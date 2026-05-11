@@ -1,0 +1,75 @@
+# Pendle PT-Loop — Leveraged Carry with Dynamic LTV Control
+
+Research code for **Project 2** of the Blockchain & DeFi special course.
+Implements and backtests a leveraged carry strategy on Pendle PT-sUSDe
+collateralized in Morpho, with two variants:
+
+1. **Static PT-loop** — fixed loan-to-value (LTV) ratio, classical
+   leveraged carry baseline.
+2. **Dynamic-LTV controller** — asymmetric band $[L_L, L_U]$ around a target
+   $L^\dagger$, with the upper bound derived from a first-passage-probability
+   constraint (analog to the $\alpha$-controller of the Krestenko *Vega Basis*
+   paper, adapted from perpetual margin to Morpho health factor).
+3. **PT-loop + Pendle Boros hedge** — overlays variant 1 with a long
+   position on Pendle Boros to hedge implied-yield-rise risk; expected
+   to improve Sharpe at the cost of some carry.
+
+Framework: [`fractal-defi`](https://github.com/Logarithm-Labs/fractal-defi) v1.3.1.
+
+## Hypothesis
+
+The premium of a leveraged PT carry strategy over the risk-free rate
+(~10 percentage points per six months on Arbitrum at the time of writing)
+is fully explained by liquidation risk. An optimal dynamic LTV controller
+preserves the majority of carry while reducing maximum drawdown by an
+order of magnitude — the same qualitative result Krestenko *et al.* (2026)
+report for spot–perpetual basis on Hyperliquid, transferred here to a
+new asset class (Pendle fixed-yield tokens) and a new safety primitive
+(Morpho health factor).
+
+## Repository layout
+
+```
+pendle-pt-loop/
+├── src/pendle_pt_loop/
+│   ├── entities/        # PendlePT, Morpho, PendleBoros entities (extend fractal BaseEntity)
+│   ├── strategies/      # Static / dynamic / hedged variants
+│   ├── loaders/         # Pendle subgraph, Morpho subgraph, sUSDe price feed
+│   └── risk/            # First-passage probability, LTV controller
+├── tests/               # Pytest unit + invariant + scenario tests
+├── notebooks/           # Exploratory + final-figure notebooks
+├── scripts/             # CLI entry points for backtest + grid search
+├── docs/                # Whitepaper (LaTeX) + figures
+└── data/                # Loader caches (gitignored)
+```
+
+## Status
+
+- **Session 1 (current):** repo scaffold, entity stubs, smoke test. Done.
+- Session 2: Pendle / Morpho real math.
+- Session 3: Data loaders.
+- Session 4: Baselines + static strategy + first backtest.
+- Session 5: Dynamic LTV controller.
+- Session 6: Boros hedge variant.
+- Session 7: Whitepaper + GitHub push + PR to fractal-defi (Extra+1).
+
+## Local setup
+
+```bash
+python -m venv .venv
+source .venv/Scripts/activate   # Git Bash on Windows; on POSIX: source .venv/bin/activate
+pip install -e ".[dev]"
+pytest -q
+```
+
+## License
+
+BSD-3-Clause, matching the parent `fractal-defi` license.
+
+## References
+
+- Krestenko, Butov, Berezovskiy, Bolotin. *Dynamic Collateral Control for Permissionless Spot–Perpetual Basis Trading.* 2026.
+- Pendle Finance. [Documentation](https://docs.pendle.finance/).
+- Morpho Labs. [Documentation](https://docs.morpho.org/).
+- Logarithm Labs. [fractal-defi](https://github.com/Logarithm-Labs/fractal-defi).
+- Ethena Labs. [USDe whitepaper](https://ethena-labs.gitbook.io/ethena-labs).
