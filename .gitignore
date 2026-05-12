@@ -53,7 +53,10 @@ coverage.xml
 data/cache/
 data/*.csv
 data/*.parquet
+data/*.pkl
 !data/.gitkeep
+# fractal-defi's Loader base class writes its CSV cache here (under <cwd>/fractal_data/<loader>/key.csv)
+fractal_data/
 
 # MLflow
 mlruns/
