@@ -1,9 +1,12 @@
-"""Session-1 smoke tests.
+"""Cross-entity smoke tests.
 
-Verify that the package imports cleanly, entities instantiate, accept
-``update_state`` + ``action_*`` calls, and report sensible balances.
-Mathematical correctness is NOT exercised here — Session 2 unit tests
-will cover invariants once the real math lands.
+Verifies that the package imports cleanly, entities instantiate, accept
+``update_state`` + ``action_*`` calls, and report sensible balances at
+the composition level. The Session-2 AMM and LLTV mechanics are tested
+exhaustively in ``tests/entities/test_pendle_pt.py`` and
+``tests/entities/test_morpho.py`` respectively; here we configure pools
+to behave as ideal swap venues (huge liquidity + zero fee) so the
+conservation checks read clearly.
 """
 
 from __future__ import annotations
@@ -18,6 +21,19 @@ from pendle_pt_loop.entities import (
     PendlePTEntity,
     PendlePTGlobalState,
 )
+
+
+# Pool size large enough that ``slippage_factor * trade/pool`` is < 1e-9
+# for any trade size we exercise in these smoke tests. This makes the
+# AMM behave as an identity swap, which is exactly what the smoke tests
+# want to assert against (slippage / fee behaviour is covered separately
+# in tests/entities/test_pendle_pt.py).
+_INFINITE_POOL: float = 1.0e12
+
+
+def _ideal_pt_config() -> PendlePTConfig:
+    """Zero-fee config; combined with a 1e12 pool gives identity swaps."""
+    return PendlePTConfig(amm_fee_rate=0.0)
 
 
 # ----------------------------------------------------------------------
@@ -35,19 +51,19 @@ def test_pendle_pt_instantiates_with_defaults() -> None:
 
 
 def test_pendle_pt_deposit_buy_and_mark() -> None:
-    entity = PendlePTEntity(PendlePTConfig(amm_fee_rate=0.0))
+    entity = PendlePTEntity(_ideal_pt_config())
     # PT trading at 0.93 USDC (≈ 14% APY @ 6mo to expiry).
     entity.update_state(
         PendlePTGlobalState(
             pt_price=0.93,
             implied_yield=0.14,
             seconds_to_expiry=180 * 24 * 3600,
-            pool_liquidity=1e7,
+            pool_liquidity=_INFINITE_POOL,
         )
     )
     entity.action_deposit(amount_in_notional=10_000.0)
     assert entity.balance == pytest.approx(10_000.0)
-    # Buy PT with all cash. Stub math: no fee, no slippage.
+    # Buy PT with all cash. Ideal-pool config: no fee, negligible slippage.
     entity.action_buy_pt(amount_in_notional=10_000.0)
     expected_face = 10_000.0 / 0.93
     assert entity.internal_state.pt_face_amount == pytest.approx(expected_face)
@@ -57,10 +73,13 @@ def test_pendle_pt_deposit_buy_and_mark() -> None:
 
 
 def test_pendle_pt_redeem_blocked_before_expiry() -> None:
-    entity = PendlePTEntity()
+    entity = PendlePTEntity(_ideal_pt_config())
     entity.update_state(
         PendlePTGlobalState(
-            pt_price=0.93, implied_yield=0.14, seconds_to_expiry=3600.0
+            pt_price=0.93,
+            implied_yield=0.14,
+            seconds_to_expiry=3600.0,
+            pool_liquidity=_INFINITE_POOL,
         )
     )
     entity.action_deposit(10_000.0)
@@ -70,10 +89,14 @@ def test_pendle_pt_redeem_blocked_before_expiry() -> None:
 
 
 def test_pendle_pt_redeem_at_expiry_pars_value() -> None:
-    entity = PendlePTEntity()
+    entity = PendlePTEntity(_ideal_pt_config())
     # Open while PT is at discount.
     entity.update_state(
-        PendlePTGlobalState(pt_price=0.93, seconds_to_expiry=3600.0)
+        PendlePTGlobalState(
+            pt_price=0.93,
+            seconds_to_expiry=3600.0,
+            pool_liquidity=_INFINITE_POOL,
+        )
     )
     entity.action_deposit(10_000.0)
     entity.action_buy_pt(10_000.0)
@@ -146,15 +169,21 @@ def test_morpho_overrepay_rejected() -> None:
 def test_one_loop_cycle_balances() -> None:
     """One iteration of the PT loop: buy PT, deposit as collateral, borrow USDC.
 
-    Verifies that under the stub math, the user's total equity
-    (cash + PT balance + Morpho balance - any leftover) is preserved
-    through the cycle (modulo rounding). This is the basic conservation
-    of value check we'll need passing before Session 2 mechanics.
+    Under the ideal-pool config (no fee, negligible slippage) the user's
+    total equity (PT entity balance + Morpho equity) is preserved across
+    the cycle. This is the topology check we need passing before plugging
+    in real Pendle / Morpho data in Session 3.
     """
-    pt = PendlePTEntity(PendlePTConfig(amm_fee_rate=0.0))
+    pt = PendlePTEntity(_ideal_pt_config())
     morpho = MorphoEntity(MorphoConfig(lltv=0.86))
 
-    pt.update_state(PendlePTGlobalState(pt_price=0.93, seconds_to_expiry=180 * 86400))
+    pt.update_state(
+        PendlePTGlobalState(
+            pt_price=0.93,
+            seconds_to_expiry=180 * 86400,
+            pool_liquidity=_INFINITE_POOL,
+        )
+    )
     morpho.update_state(MorphoGlobalState(collateral_price=0.93, debt_price=1.0))
 
     # Step 1: 10k USDC in.
@@ -166,11 +195,13 @@ def test_one_loop_cycle_balances() -> None:
     pt.action_buy_pt(10_000.0)
     face_bought = pt.internal_state.pt_face_amount
 
-    # Step 3: move PT into Morpho as collateral.
+    # Step 3: move PT into Morpho as collateral. The handoff bypasses
+    # the action API here — Session 4's loop strategy will route this
+    # through ActionToTake; for the smoke test we mutate directly.
     pt.internal_state.pt_face_amount = 0.0  # leaves PT entity
     morpho.action_deposit(face_bought)  # arrives in Morpho
 
-    # Step 4: borrow at LTV=0.80.
+    # Step 4: borrow at LTV=0.80 (within Morpho's lltv=0.86).
     collat_val = morpho.collateral_value
     borrow = 0.80 * collat_val
     morpho.action_borrow(borrow)
@@ -179,7 +210,11 @@ def test_one_loop_cycle_balances() -> None:
     # (in real loop the strategy would route it; here we just simulate).
     pt.action_deposit(borrow)
 
-    # Total equity: cash in PT + PT mark in PT + Morpho equity.
+    # Total equity: PT entity balance + Morpho equity.
     total = pt.balance + morpho.balance
-    # Should still be 10k (no fees in Session 1 stub).
-    assert total == pytest.approx(10_000.0, rel=1e-9)
+    # Under ideal-pool config, conservation holds to within rounding —
+    # the residual ~5e-5 USDC is the slippage_factor * trade^2 / pool
+    # term that does not fully vanish even at pool=1e12. Within default
+    # ``pytest.approx`` tolerance (1e-6 relative) that's a cent on a
+    # ten-thousand-dollar position, well under any backtest noise floor.
+    assert total == pytest.approx(10_000.0)
