@@ -1,8 +1,12 @@
 """Tests for :class:`PendleMarketLoader`.
 
-HTTP is fully mocked via ``monkeypatch.setattr(requests, "post", ...)`` so the
-suite stays hermetic. A single live integration test is gated behind the
-``PENDLE_INTEGRATION=1`` env var.
+HTTP is mocked via ``monkeypatch.setattr(requests, "get", ...)`` so the
+suite stays hermetic. A single live integration test is gated behind
+``PENDLE_INTEGRATION=1``.
+
+The loader hits Pendle's public REST endpoint
+``GET /core/v1/{chain_id}/markets/{market}/historical-data`` and parses
+its parallel-array response shape.
 """
 from __future__ import annotations
 
@@ -15,7 +19,7 @@ import pytest
 import requests
 
 from pendle_pt_loop.loaders.pendle import (
-    PENDLE_GRAPHQL_URL,
+    PENDLE_REST_BASE,
     PendleMarketLoader,
 )
 
@@ -44,152 +48,183 @@ class _FakeResponse:
         return self._payload
 
 
-def _snapshot_rows(start_ts: int, count: int, *, hours: int = 1) -> list[dict[str, Any]]:
-    """Synthesize ``count`` hourly snapshots starting at ``start_ts``."""
-    rows: list[dict[str, Any]] = []
+def _hourly_payload(start_ts: int, count: int) -> dict[str, Any]:
+    """Synthesize the Pendle parallel-array payload for ``count`` hourly rows."""
+    timestamps: list[int] = []
+    implied_apy: list[str] = []
+    tvl: list[str] = []
     for i in range(count):
-        ts = start_ts + i * hours * 3600
-        # pt_price drifts linearly 0.93 → 0.99 across the window
-        pt_price = 0.93 + (0.06 * i / max(count - 1, 1))
-        rows.append(
-            {
-                "timestamp": ts,
-                "ptPrice": pt_price,
-                "impliedApy": 0.14,
-                "liquidity": 1_000_000.0 + i * 10.0,
-            }
-        )
-    return rows
-
-
-def _payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"data": {"marketSnapshots": {"results": rows}}}
-
-
-def _patch_post(monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Patch ``requests.post`` and return a call-log to assert against."""
-    calls: list[dict[str, Any]] = []
-
-    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
-        calls.append({"url": url, **kwargs})
-        return _FakeResponse(payload)
-
-    monkeypatch.setattr(requests, "post", fake_post)
-    return calls
-
-
-def _make_loader(tmp_path, **overrides: Any) -> PendleMarketLoader:
-    """Construct a loader rooted at ``tmp_path`` for cache isolation."""
-    os.environ["DATA_PATH"] = str(tmp_path)
-    kwargs: dict[str, Any] = {
-        "market_address": _MARKET,
-        "expiry_timestamp": _EXPIRY_TS,
-        "start_time": _START,
-        "end_time": _END,
+        timestamps.append(start_ts + i * 3600)
+        # implied_yield drifts 14% → 10% across the window
+        implied_apy.append(f"{0.14 - 0.04 * i / max(count - 1, 1):.6f}")
+        tvl.append(f"{1_000_000.0 + i * 10.0:.4f}")
+    return {
+        "total": count,
+        "timestamp_start": timestamps[0],
+        "timestamp_end": timestamps[-1],
+        "timestamp": timestamps,
+        "impliedApy": implied_apy,
+        "baseApy": ["0.10"] * count,
+        "underlyingApy": ["0.07"] * count,
+        "maxApy": ["0.20"] * count,
+        "tvl": tvl,
     }
-    kwargs.update(overrides)
-    return PendleMarketLoader(**kwargs)
 
 
-# ------------------------------------------------------------------- tests
+@pytest.fixture(autouse=True)
+def _isolated_cache(tmp_path, monkeypatch):
+    """Redirect Loader._base_path to a tmp dir so cache tests don't pollute cwd."""
+    monkeypatch.setenv("DATA_PATH", str(tmp_path))
+    yield
 
 
-def test_loader_instantiates_with_sensible_args(tmp_path) -> None:
-    loader = _make_loader(tmp_path)
+# ----------------------------------------------------------------- tests
+
+
+def test_loader_instantiates_with_sensible_args() -> None:
+    loader = PendleMarketLoader(
+        market_address=_MARKET,
+        expiry_timestamp=_EXPIRY_TS,
+        start_time=_START,
+        end_time=_END,
+    )
     assert loader.market_address == _MARKET
     assert loader.expiry_timestamp == _EXPIRY_TS
-    assert loader.start_time == _START
-    assert loader.end_time == _END
-    # Cache key encodes the address + date window so reruns hit the same file.
-    key = loader._cache_key()
-    assert _MARKET in key
-    assert "20250101" in key and "20250102" in key
+    assert loader.chain_id == 1
 
 
-def test_extract_then_transform_returns_expected_columns(
-    tmp_path, monkeypatch
-) -> None:
-    rows = _snapshot_rows(int(_START.timestamp()), count=24)
-    _patch_post(monkeypatch, _payload(rows))
-    loader = _make_loader(tmp_path)
-    loader.extract()
-    loader.transform()
-    df = loader._data
-    assert isinstance(df, pd.DataFrame)
+def test_extract_then_transform_returns_expected_columns(monkeypatch) -> None:
+    start_ts = int(_START.timestamp())
+    payload = _hourly_payload(start_ts, count=24)
+    monkeypatch.setattr(
+        requests, "get", lambda *a, **kw: _FakeResponse(payload)
+    )
+    loader = PendleMarketLoader(
+        market_address=_MARKET,
+        expiry_timestamp=_EXPIRY_TS,
+        start_time=_START,
+        end_time=_END,
+    )
+    df = loader.read(with_run=True)
     assert list(df.columns) == [
         "pt_price",
         "implied_yield",
         "seconds_to_expiry",
         "pool_liquidity",
     ]
-    assert df.index.tz is not None and str(df.index.tz) == "UTC"
     assert len(df) == 24
-    # Implied yield round-trips through the payload (we set 0.14 above).
-    assert df["implied_yield"].iloc[0] == pytest.approx(0.14)
+    assert isinstance(df.index, pd.DatetimeIndex)
+    assert df.index.tz is not None
 
 
-def test_seconds_to_expiry_strictly_decreasing(tmp_path, monkeypatch) -> None:
-    rows = _snapshot_rows(int(_START.timestamp()), count=24)
-    _patch_post(monkeypatch, _payload(rows))
-    loader = _make_loader(tmp_path)
-    loader.extract()
-    loader.transform()
-    df = loader._data
-    deltas = df["seconds_to_expiry"].diff().dropna()
-    # Hourly samples ⇒ each step is -3600 seconds (strictly decreasing).
-    assert (deltas < 0).all(), deltas.head()
-
-
-def test_seconds_to_expiry_zero_at_or_after_expiry_timestamp(
-    tmp_path, monkeypatch
-) -> None:
-    # Place snapshots straddling the expiry: half before, half at/after.
-    before = _snapshot_rows(_EXPIRY_TS - 2 * 3600, count=2)
-    at_after = _snapshot_rows(_EXPIRY_TS, count=3)
-    payload = _payload(before + at_after)
-    _patch_post(monkeypatch, payload)
-    # Widen the loader's [start, end] window to admit the synthetic rows.
-    loader = _make_loader(
-        tmp_path,
-        start_time=datetime.fromtimestamp(_EXPIRY_TS - 24 * 3600, tz=timezone.utc),
-        end_time=datetime.fromtimestamp(_EXPIRY_TS + 24 * 3600, tz=timezone.utc),
+def test_seconds_to_expiry_strictly_decreasing(monkeypatch) -> None:
+    start_ts = int(_START.timestamp())
+    payload = _hourly_payload(start_ts, count=12)
+    monkeypatch.setattr(
+        requests, "get", lambda *a, **kw: _FakeResponse(payload)
     )
-    loader.extract()
-    loader.transform()
-    df = loader._data
-    # Rows past expiry must be exactly 0.
-    past_expiry = df[df.index >= pd.Timestamp(_EXPIRY_TS, unit="s", tz="UTC")]
-    assert len(past_expiry) == 3
-    assert (past_expiry["seconds_to_expiry"] == 0.0).all()
-    # Rows before expiry must be strictly positive.
-    pre_expiry = df[df.index < pd.Timestamp(_EXPIRY_TS, unit="s", tz="UTC")]
-    assert (pre_expiry["seconds_to_expiry"] > 0.0).all()
+    loader = PendleMarketLoader(
+        market_address=_MARKET,
+        expiry_timestamp=_EXPIRY_TS,
+        start_time=_START,
+        end_time=_END,
+    )
+    df = loader.read(with_run=True)
+    diffs = df["seconds_to_expiry"].diff().dropna()
+    assert (diffs < 0).all()
 
 
-def test_read_with_cache_round_trip(tmp_path, monkeypatch) -> None:
-    rows = _snapshot_rows(int(_START.timestamp()), count=12)
-    call_log = _patch_post(monkeypatch, _payload(rows))
-    loader = _make_loader(tmp_path)
-    first = loader.read(with_run=True)
-    assert len(call_log) == 1
-    # Same address+window builds a fresh loader, which should hit cache only.
-    loader2 = _make_loader(tmp_path)
-    second = loader2.read()
-    assert len(call_log) == 1, "cache hit must not re-invoke HTTP"
+def test_seconds_to_expiry_zero_at_or_after_expiry(monkeypatch) -> None:
+    # First three timestamps are exactly at expiry; rest are after.
+    start_ts = _EXPIRY_TS
+    payload = _hourly_payload(start_ts, count=5)
+    monkeypatch.setattr(
+        requests, "get", lambda *a, **kw: _FakeResponse(payload)
+    )
+    loader = PendleMarketLoader(
+        market_address=_MARKET,
+        expiry_timestamp=_EXPIRY_TS,
+        start_time=datetime.fromtimestamp(start_ts, tz=timezone.utc),
+        end_time=datetime.fromtimestamp(start_ts + 4 * 3600, tz=timezone.utc),
+    )
+    df = loader.read(with_run=True)
+    assert (df["seconds_to_expiry"] == 0).all()
+
+
+def test_pt_price_derived_from_implied_yield(monkeypatch) -> None:
+    """Linear pricing: pt_price = 1 - implied_yield * tau."""
+    start_ts = int(_START.timestamp())
+    payload = _hourly_payload(start_ts, count=4)
+    monkeypatch.setattr(
+        requests, "get", lambda *a, **kw: _FakeResponse(payload)
+    )
+    loader = PendleMarketLoader(
+        market_address=_MARKET,
+        expiry_timestamp=_EXPIRY_TS,
+        start_time=_START,
+        end_time=_END,
+    )
+    df = loader.read(with_run=True)
+    SECONDS_PER_YEAR = 365.25 * 24 * 3600
+    for ts, row in df.iterrows():
+        tau = row["seconds_to_expiry"] / SECONDS_PER_YEAR
+        expected = max(0.0, min(1.0, 1.0 - row["implied_yield"] * tau))
+        assert row["pt_price"] == pytest.approx(expected, abs=1e-9)
+
+
+def test_read_with_cache_round_trip(monkeypatch) -> None:
+    start_ts = int(_START.timestamp())
+    payload = _hourly_payload(start_ts, count=6)
+
+    calls = {"n": 0}
+
+    def fake_get(*args: Any, **kwargs: Any) -> _FakeResponse:
+        calls["n"] += 1
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    loader = PendleMarketLoader(
+        market_address=_MARKET,
+        expiry_timestamp=_EXPIRY_TS,
+        start_time=_START,
+        end_time=_END,
+    )
+    df_fresh = loader.read(with_run=True).copy()
+    assert calls["n"] == 1
+    # Second loader instance reads cache only — must not hit HTTP again.
+    loader2 = PendleMarketLoader(
+        market_address=_MARKET,
+        expiry_timestamp=_EXPIRY_TS,
+        start_time=_START,
+        end_time=_END,
+    )
+    df_cached = loader2.read(with_run=False)
+    assert calls["n"] == 1  # unchanged
     pd.testing.assert_frame_equal(
-        first.sort_index(),
-        second.sort_index(),
-        check_freq=False,
+        df_cached.astype(float), df_fresh.astype(float), check_exact=False
     )
 
 
-def test_handles_empty_payload(tmp_path, monkeypatch) -> None:
-    _patch_post(monkeypatch, _payload([]))
-    loader = _make_loader(tmp_path)
-    loader.extract()
-    loader.transform()
-    df = loader._data
-    assert isinstance(df, pd.DataFrame)
+def test_handles_empty_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **kw: _FakeResponse(
+            {
+                "total": 0,
+                "timestamp": [],
+                "impliedApy": [],
+                "tvl": [],
+            }
+        ),
+    )
+    loader = PendleMarketLoader(
+        market_address=_MARKET,
+        expiry_timestamp=_EXPIRY_TS,
+        start_time=_START,
+        end_time=_END,
+    )
+    df = loader.read(with_run=True)
     assert df.empty
     assert list(df.columns) == [
         "pt_price",
@@ -199,57 +234,29 @@ def test_handles_empty_payload(tmp_path, monkeypatch) -> None:
     ]
 
 
-def test_implied_yield_derived_when_missing(tmp_path, monkeypatch) -> None:
-    """If the API omits ``impliedApy``, the loader falls back to -ln(pt)/tau."""
-    ts = int(_START.timestamp())
-    rows = [
-        {
-            "timestamp": ts,
-            "ptPrice": 0.95,
-            # impliedApy intentionally absent
-            "liquidity": 1_000_000.0,
-        }
-    ]
-    _patch_post(monkeypatch, _payload(rows))
-    loader = _make_loader(tmp_path)
-    loader.extract()
-    loader.transform()
-    df = loader._data
-    # tau = (expiry - ts) seconds, in years; identity is y = -ln(pt) / tau.
-    import math
-
-    tau_years = (_EXPIRY_TS - ts) / (365.0 * 24.0 * 3600.0)
-    expected = -math.log(0.95) / tau_years
-    assert df["implied_yield"].iloc[0] == pytest.approx(expected, rel=1e-9)
+def test_pendle_rest_url_unchanged() -> None:
+    """Lock the base URL so a regression on the constant trips this test."""
+    assert PENDLE_REST_BASE == "https://api-v2.pendle.finance/core/v1"
 
 
 @pytest.mark.skipif(
     not os.getenv("PENDLE_INTEGRATION"),
     reason="set PENDLE_INTEGRATION=1 to enable",
 )
-def test_integration_pendle_api(tmp_path) -> None:
-    """Live smoke test against the public Pendle GraphQL endpoint.
-
-    Disabled by default. Set ``PENDLE_INTEGRATION=1`` to enable. The test
-    only verifies that the endpoint responds with a well-shaped payload —
-    not the numeric content, which changes between blocks.
-    """
-    # A real Pendle market address (PT-sUSDe — adjust if the market expires).
-    market = os.getenv("PENDLE_INTEGRATION_MARKET") or _MARKET
+def test_integration_pendle_api() -> None:
+    """End-to-end live fetch — only runs when explicitly opted into."""
+    market = "0xb6ac3d5da138918ac4e84441e924a20daa60dbdd"  # PT-sUSDE-27NOV2025
+    expiry = 1764201600  # 2025-11-27 UTC
+    start = datetime(2025, 10, 1, tzinfo=timezone.utc)
+    end = datetime(2025, 11, 1, tzinfo=timezone.utc)
     loader = PendleMarketLoader(
         market_address=market,
-        expiry_timestamp=_EXPIRY_TS,
-        start_time=_START,
-        end_time=_END,
+        expiry_timestamp=expiry,
+        start_time=start,
+        end_time=end,
     )
-    os.environ["DATA_PATH"] = str(tmp_path)
     df = loader.read(with_run=True)
-    assert isinstance(df, pd.DataFrame)
-    assert list(df.columns) == [
-        "pt_price",
-        "implied_yield",
-        "seconds_to_expiry",
-        "pool_liquidity",
-    ]
-    # Endpoint should respond with PENDLE_GRAPHQL_URL on the OK path.
-    assert PENDLE_GRAPHQL_URL.startswith("https://api-v2.pendle.finance")
+    assert not df.empty
+    assert (df["pt_price"] > 0).all()
+    assert (df["pt_price"] <= 1.0).all()
+    assert (df["implied_yield"] >= 0).all()

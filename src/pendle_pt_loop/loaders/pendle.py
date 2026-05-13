@@ -1,4 +1,4 @@
-"""Historical PT market loader (Pendle GraphQL API).
+"""Historical PT market loader (Pendle public REST API).
 
 Goal
 ----
@@ -15,37 +15,41 @@ consumed by :class:`pendle_pt_loop.entities.PendlePTEntity` through its
 
 Data source
 -----------
-Primary: **Pendle GraphQL API** (keyless, public).
+**Pendle public REST API**, keyless:
 
-  ``POST https://api-v2.pendle.finance/core/graphql``
+  ``GET https://api-v2.pendle.finance/core/v1/{chain_id}/markets/{market}/historical-data``
+  ``?time_frame=hour&from=<ISO>&to=<ISO>``
 
-We use the ``marketSnapshots(chainId, address, timeFrame, ...)`` query,
-which the Pendle team exposes for charting. The fields we read are:
+The response is a dict with parallel arrays:
 
-* ``timestamp``      → row index (UTC).
-* ``ptPrice``        → ``pt_price``.
-* ``impliedApy``     → ``implied_yield``.
-* ``liquidity``      → ``pool_liquidity``.
+* ``timestamp[]``     → row index (Unix epoch seconds, UTC).
+* ``impliedApy[]``    → ``implied_yield``.
+* ``tvl[]``           → ``pool_liquidity``.
+* ``baseApy[]``, ``underlyingApy[]``, ``maxApy[]`` — informational.
+
+The endpoint does NOT expose a direct ``ptPrice`` field, so we compute it
+from ``implied_yield`` + ``seconds_to_expiry`` using
+:func:`pendle_pt_loop.entities.pendle_pt.compute_pt_price` with the
+``"linear"`` mode (matches Pendle Oracle's own convention, which is
+what Morpho's oracle reads — keeping pricing consistent across the two
+sides of the loop).
 
 ``seconds_to_expiry`` is always computed locally as
 ``max(expiry_timestamp - row_timestamp, 0)``.
 
 Notes
 -----
-* The Pendle GraphQL endpoint occasionally renames fields (``ptDiscount``
-  vs ``ptPrice``, ``impliedYield`` vs ``impliedApy``). The transform layer
-  tolerates either spelling so a minor upstream rename does not break the
-  loader; callers should regenerate the cache after such a rename.
-* If the API ever omits ``impliedApy`` for a given snapshot, we fall back
-  to the continuous-compounding identity
-  :math:`y = -\\ln(\\text{pt\\_price}) / \\tau` where ``tau`` is years
-  remaining to expiry.
-* Live integration is exercised in tests by setting the
-  ``PENDLE_INTEGRATION=1`` environment variable; all other tests mock
-  ``requests.post``.
+* The Pendle endpoint caps returned rows (~60-day windows at hourly
+  granularity). For longer windows the loader would need pagination
+  via successive ``from`` slices; for our PT-sUSDE-27NOV2025 backtest
+  the active-market data covers roughly Sep 28 → Nov 27 (≈60 days),
+  which fits in one call. If we ever need longer history, extend
+  ``extract`` to paginate.
+* Live integration is exercised in tests by setting
+  ``PENDLE_INTEGRATION=1``; all other tests mock ``requests.get``.
 
 The cache lives under ``<DATA_PATH or cwd>/fractal_data/pendlemarketloader/``
-as a CSV, keyed by ``<market_address>-<start_date>-<end_date>``.
+as a CSV, keyed by ``<chain>-<market_address>-<start_date>-<end_date>``.
 """
 from __future__ import annotations
 
@@ -58,15 +62,15 @@ import requests
 
 from fractal.loaders.base_loader import Loader, LoaderType
 
-PENDLE_GRAPHQL_URL = "https://api-v2.pendle.finance/core/graphql"
+from pendle_pt_loop.entities.pendle_pt import compute_pt_price
 
-# One year, in seconds. Used to convert seconds-to-expiry → years-to-expiry
-# for continuous-compounding implied-yield fallbacks.
-_SECONDS_PER_YEAR: float = 365.0 * 24.0 * 3600.0
+PENDLE_REST_BASE: str = "https://api-v2.pendle.finance/core/v1"
 
-# Default GraphQL request timeout (seconds). The Pendle endpoint usually
-# returns within a couple seconds; a 30s cap keeps backtests responsive
-# while allowing a slow round-trip without crashing.
+# One year (Julian, matching SECONDS_PER_YEAR in the entity) for the
+# implied-yield fallback identity.
+_SECONDS_PER_YEAR: float = 365.25 * 24.0 * 3600.0
+
+# REST timeout. Pendle endpoints usually return < 2 s.
 _REQUEST_TIMEOUT_S: float = 30.0
 
 # Output columns, in canonical order. PendlePTEntity reads these.
@@ -77,22 +81,6 @@ _OUTPUT_COLUMNS: tuple[str, ...] = (
     "pool_liquidity",
 )
 
-# Default GraphQL query template. ``%s`` placeholders are interpolated by
-# ``PendleMarketLoader.extract``. We request the ``HOUR`` timeframe so the
-# resulting DataFrame is already at the cadence the backtest expects.
-_SNAPSHOTS_QUERY: str = """
-query MarketSnapshots($marketId: String!, $timeFrame: TimeFrame!) {
-  marketSnapshots(marketId: $marketId, timeFrame: $timeFrame) {
-    results {
-      timestamp
-      ptPrice
-      impliedApy
-      liquidity
-    }
-  }
-}
-""".strip()
-
 
 def _to_utc(dt: datetime) -> datetime:
     """Return ``dt`` as a UTC-aware datetime; assume naive datetimes are UTC."""
@@ -101,29 +89,11 @@ def _to_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def _pick_field(row: dict[str, Any], *names: str) -> Any:
-    """Return the first present non-null value among ``names`` in ``row``."""
-    for name in names:
-        if name in row and row[name] is not None:
-            return row[name]
-    return None
-
-
-def _parse_timestamp(raw: Any) -> pd.Timestamp:
-    """Parse an integer-epoch or ISO-8601 timestamp to a UTC ``pd.Timestamp``."""
-    if isinstance(raw, (int, float)):
-        return pd.Timestamp(int(raw), unit="s", tz="UTC")
-    return pd.Timestamp(raw, tz="UTC") if not isinstance(raw, pd.Timestamp) else raw
-
-
 def _derive_implied_yield(pt_price: float, seconds_to_expiry: float) -> float:
     """Continuous-compounding implied yield from ``pt_price`` and ``tau``.
 
-    Identity used by ``compute_pt_price`` in ``entities.pendle_pt`` in
-    exponential mode: ``pt_price = exp(-y * tau)`` ⇒ ``y = -ln(pt) / tau``.
-
-    Returns 0.0 if either input is non-positive or pt_price is degenerate
-    (avoids ``log(0)`` and division-by-zero at/after expiry).
+    Inverse of ``compute_pt_price`` in exponential mode. Returns 0.0 at
+    expiry or for degenerate inputs.
     """
     if seconds_to_expiry <= 0.0 or pt_price <= 0.0 or pt_price >= 1.0:
         return 0.0
@@ -134,11 +104,12 @@ def _derive_implied_yield(pt_price: float, seconds_to_expiry: float) -> float:
 class PendleMarketLoader(Loader):
     """Hourly PT market history for a single Pendle market.
 
-    Pipeline: ``extract`` posts a GraphQL query to the public Pendle API
-    and stashes the raw payload in ``self._raw``; ``transform`` parses it
-    into a UTC-indexed DataFrame with the four columns the backtest
-    consumes; ``read(with_run=True)`` runs the whole pipeline and writes
-    a CSV cache; ``read()`` reads that cache back.
+    Pipeline: ``extract`` issues a single REST GET to the Pendle
+    ``historical-data`` endpoint and stashes the JSON in ``self._raw``;
+    ``transform`` parses the parallel-array payload into a UTC-indexed
+    DataFrame with the four canonical columns; ``read(with_run=True)``
+    runs the whole pipeline and writes a CSV cache; ``read()`` reads
+    that cache back.
     """
 
     def __init__(
@@ -148,6 +119,7 @@ class PendleMarketLoader(Loader):
         start_time: datetime,
         end_time: datetime,
         *,
+        chain_id: int = 1,
         api_key: str | None = None,
         loader_type: LoaderType = LoaderType.CSV,
     ) -> None:
@@ -156,45 +128,52 @@ class PendleMarketLoader(Loader):
         self.expiry_timestamp: int = int(expiry_timestamp)
         self.start_time: datetime = _to_utc(start_time)
         self.end_time: datetime = _to_utc(end_time)
+        self.chain_id: int = int(chain_id)
         self._api_key: str | None = api_key
-        # ``extract`` populates this with the raw payload (list of snapshots)
-        # so ``transform`` can be unit-tested independently if needed.
-        self._raw: list[dict[str, Any]] = []
+        # ``extract`` populates this with the raw payload dict so
+        # ``transform`` can be unit-tested independently if needed.
+        self._raw: dict[str, Any] = {}
 
     def _cache_key(self) -> str:
-        """``<market_address>-<YYYYMMDD>-<YYYYMMDD>`` — stable across runs."""
+        """``<chain>-<market_address>-<YYYYMMDD>-<YYYYMMDD>`` — stable."""
         s = self.start_time.strftime("%Y%m%d")
         e = self.end_time.strftime("%Y%m%d")
-        return f"{self.market_address}-{s}-{e}"
+        return f"{self.chain_id}-{self.market_address}-{s}-{e}"
+
+    def _url(self) -> str:
+        return (
+            f"{PENDLE_REST_BASE}/{self.chain_id}/markets/"
+            f"{self.market_address}/historical-data"
+        )
+
+    def _params(self) -> dict[str, str]:
+        return {
+            "time_frame": "hour",
+            "from": self.start_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": self.end_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
 
     def _headers(self) -> dict[str, str]:
-        """Pendle GraphQL is keyless, but tolerate an optional ``api_key``."""
-        headers = {"Content-Type": "application/json"}
+        """Pendle REST is keyless; tolerate an optional ``api_key``."""
+        headers = {"Accept": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
 
     def extract(self) -> None:
-        """POST the snapshots query and stash the result list in ``_raw``."""
-        body = {
-            "query": _SNAPSHOTS_QUERY,
-            "variables": {
-                "marketId": self.market_address,
-                "timeFrame": "HOUR",
-            },
-        }
-        response = requests.post(
-            PENDLE_GRAPHQL_URL,
-            json=body,
+        """GET the historical-data endpoint and stash the JSON in ``_raw``."""
+        response = requests.get(
+            self._url(),
+            params=self._params(),
             headers=self._headers(),
             timeout=_REQUEST_TIMEOUT_S,
         )
         response.raise_for_status()
         payload = response.json() if callable(getattr(response, "json", None)) else {}
-        self._raw = _extract_snapshot_rows(payload)
+        self._raw = payload if isinstance(payload, dict) else {}
 
     def transform(self) -> None:
-        """Convert ``self._raw`` into the canonical hourly DataFrame."""
+        """Convert ``self._raw`` (parallel arrays) into the canonical DataFrame."""
         if not self._raw:
             self._data = _empty_frame()
             return
@@ -219,53 +198,57 @@ class PendleMarketLoader(Loader):
 def _empty_frame() -> pd.DataFrame:
     """Empty DataFrame with the canonical column set and a UTC datetime index."""
     idx = pd.DatetimeIndex([], tz="UTC", name="timestamp")
-    return pd.DataFrame({c: pd.Series(dtype=float) for c in _OUTPUT_COLUMNS}, index=idx)
+    return pd.DataFrame(
+        {c: pd.Series(dtype=float) for c in _OUTPUT_COLUMNS}, index=idx
+    )
 
 
-def _extract_snapshot_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Pull the snapshot list out of a Pendle GraphQL response payload."""
-    if not isinstance(payload, dict):
-        return []
-    data = payload.get("data") or {}
-    snapshots = data.get("marketSnapshots") or {}
-    results = snapshots.get("results") if isinstance(snapshots, dict) else snapshots
-    if not isinstance(results, list):
-        return []
-    return results
+def _build_frame(payload: dict[str, Any], expiry_ts: int) -> pd.DataFrame:
+    """Build a UTC-indexed DataFrame from Pendle's parallel-array response.
 
+    Expected payload keys:
+        ``timestamp`` (list[int]), ``impliedApy`` (list[str|float]),
+        ``tvl`` (list[str|float]).
+    """
+    timestamps = payload.get("timestamp") or []
+    implied = payload.get("impliedApy") or []
+    tvl = payload.get("tvl") or []
+    if not timestamps:
+        return _empty_frame()
 
-def _build_frame(rows: list[dict[str, Any]], expiry_ts: int) -> pd.DataFrame:
-    """Build a UTC-indexed DataFrame with the four canonical columns."""
+    n = min(len(timestamps), len(implied), len(tvl))
+    if n == 0:
+        return _empty_frame()
+
     parsed: list[dict[str, Any]] = []
-    for row in rows:
-        ts_raw = _pick_field(row, "timestamp", "time", "hourStartUnix")
-        pt_price = _pick_field(row, "ptPrice", "ptDiscount", "price")
-        if ts_raw is None or pt_price is None:
+    for i in range(n):
+        try:
+            epoch = int(timestamps[i])
+            implied_y = float(implied[i])
+            liquidity = float(tvl[i])
+        except (TypeError, ValueError):
             continue
-        ts = _parse_timestamp(ts_raw)
-        epoch = int(ts.timestamp())
         seconds_to_expiry = float(max(expiry_ts - epoch, 0))
-        pt_price_f = float(pt_price)
-        implied_raw = _pick_field(row, "impliedApy", "impliedYield")
-        implied = (
-            float(implied_raw)
-            if implied_raw is not None
-            else _derive_implied_yield(pt_price_f, seconds_to_expiry)
+        # Linear pricing matches Pendle Oracle convention (what Morpho reads).
+        pt_price = compute_pt_price(
+            implied_yield=implied_y,
+            seconds_to_expiry=seconds_to_expiry,
+            mode="linear",
         )
-        liquidity = _pick_field(row, "liquidity", "totalLiquidity", "pool_liquidity")
         parsed.append(
             {
-                "timestamp": ts,
-                "pt_price": pt_price_f,
-                "implied_yield": implied,
+                "timestamp": pd.Timestamp(epoch, unit="s", tz="UTC"),
+                "pt_price": pt_price,
+                "implied_yield": implied_y,
                 "seconds_to_expiry": seconds_to_expiry,
-                "pool_liquidity": float(liquidity) if liquidity is not None else 0.0,
+                "pool_liquidity": liquidity,
             }
         )
     if not parsed:
         return _empty_frame()
     df = pd.DataFrame(parsed).set_index("timestamp").sort_index()
     df = df[~df.index.duplicated(keep="first")]
+    df.index.name = "timestamp"
     return df[list(_OUTPUT_COLUMNS)]
 
 
@@ -285,8 +268,11 @@ def _restore_index(df: pd.DataFrame) -> pd.DataFrame:
         df = df.set_index("timestamp")
     df.index = pd.to_datetime(df.index, utc=True)
     df.index.name = "timestamp"
-    # Coerce numeric columns back to float (CSV reads them as object if NaN).
     for col in _OUTPUT_COLUMNS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df[list(_OUTPUT_COLUMNS)]
+
+
+# Backwards-compatible alias for tests that imported the GraphQL URL.
+PENDLE_GRAPHQL_URL: str = PENDLE_REST_BASE
