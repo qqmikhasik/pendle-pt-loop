@@ -62,6 +62,23 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
+## API keys
+
+All Session 1-4 loaders use **keyless public APIs** (Pendle REST, Morpho
+GraphQL, Binance public REST), so the backtest runs without any keys
+configured. Optional integrations that DO need keys are listed in
+`.env.example`:
+
+- `ALCHEMY_URL` — for direct on-chain reads (e.g. verifying sUSDe
+  `pricePerShare` in Session 5/6 if depeg modeling becomes relevant).
+- `ETHERSCAN_API_KEY` — for transaction / contract-state spot checks.
+- `THEGRAPH_API_KEY` — fallback subgraph access for Pendle / Morpho if
+  the public REST/GraphQL endpoints become rate-limited.
+- `DUNE_API_KEY` — Dune dashboards for the whitepaper (Session 7).
+
+Copy `.env.example` to `.env` and fill in real values; `.env` is
+gitignored.
+
 ## License
 
 BSD-3-Clause, matching the parent `fractal-defi` license.
