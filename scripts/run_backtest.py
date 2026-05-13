@@ -36,6 +36,8 @@ from fractal.core.base import Observation
 from pendle_pt_loop.observations import build_observations
 from pendle_pt_loop.strategies import (
     BaselineParams,
+    DynamicLoopParams,
+    DynamicLoopStrategy,
     HoldPTNoLeverageStrategy,
     HoldSUSDeStrategy,
     HoldUSDCStrategy,
@@ -230,6 +232,11 @@ def main() -> int:
         TARGET_LTV=args.target_ltv,
         N_CYCLES=args.n_cycles,
     )
+    dynamic_params = DynamicLoopParams(
+        INITIAL_BALANCE=args.initial_balance,
+        TARGET_LTV=args.target_ltv,
+        N_CYCLES=args.n_cycles,
+    )
 
     strategies = [
         ("HoldUSDC", HoldUSDCStrategy(params=baseline_params)),
@@ -238,6 +245,10 @@ def main() -> int:
         (
             f"StaticLoop_LTV{args.target_ltv:.2f}_N{args.n_cycles}",
             StaticLoopStrategy(params=loop_params),
+        ),
+        (
+            f"DynamicLoop_LTV{args.target_ltv:.2f}_N{args.n_cycles}",
+            DynamicLoopStrategy(params=dynamic_params),
         ),
     ]
 

@@ -32,6 +32,10 @@ from pendle_pt_loop.strategies.baselines import (
     HoldSUSDeStrategy,
     HoldUSDCStrategy,
 )
+from pendle_pt_loop.strategies.dynamic_loop import (
+    DynamicLoopParams,
+    DynamicLoopStrategy,
+)
 from pendle_pt_loop.strategies.static_loop import (
     StaticLoopParams,
     StaticLoopStrategy,
@@ -39,6 +43,8 @@ from pendle_pt_loop.strategies.static_loop import (
 
 __all__ = [
     "BaselineParams",
+    "DynamicLoopParams",
+    "DynamicLoopStrategy",
     "HoldPTNoLeverageStrategy",
     "HoldSUSDeStrategy",
     "HoldUSDCStrategy",
