@@ -34,16 +34,6 @@ paths or `cd /c/C++/pendle-pt-loop && ...` for git-touching commands.
 - LTV (loan-to-value) = debt / collateral (both in USDC equivalent).
 - Health factor = liquidation_LTV / current_LTV (>1 = safe; ≤1 = liquidatable).
 
-## Multi-session walkthrough
-Live notes per session live in `/c/C++/Block_Chain_2_solution/Project2_PendleLoop_Walkthrough.md`.
-That doc is NOT part of this repo (it's the student's personal reference).
-Append a session log there at the end of every working session.
-
-## Memory references for cross-session continuity
-- `~/.claude/projects/.../memory/project_blockchain2_project2.md` — project status
-- `~/.claude/projects/.../memory/project_hw8_pendle_eda.md` — HW8 Pendle reference data
-- `~/.claude/projects/.../memory/project_dex_aggregator.md` — Project 1 patterns to reuse
-
 ## Git
 - Default branch: `main`.
 - Never push without explicit user request.

@@ -45,7 +45,7 @@ gated by an asymmetric band derived from a first-passage liquidation
 probability adapted from Krestenko \emph{et al.}~\cite{krestenko2026}
 on basis trading, and (iii) a funding-rate-hedged variant using
 Hyperliquid ETH perpetual funding as the underlying that Pendle Boros
-tokenises. On the 60-day live backtest the static loop earns
+tokenises. On the 59-day live backtest the static loop earns
 \(+8.70\%\) APY (vs.~\(+7.11\%\) for an unleveraged PT hold), the
 dynamic controller produces an identical equity curve (the band was
 never breached in the calm regime), and the hedged variant earns
@@ -319,7 +319,7 @@ function hedged_predict(state, rho_H):
 
 All data are pulled at hourly cadence over the window
 \(\mathrm{2025\text{-}09\text{-}29} \rightarrow
-\mathrm{2025\text{-}11\text{-}27}\) (60 days, 1{,}416 hourly
+\mathrm{2025\text{-}11\text{-}27}\) (59 days, 1{,}416 hourly
 observations).
 
 \begin{itemize}[topsep=2pt,itemsep=0pt]
@@ -420,7 +420,7 @@ DynamicLoop\_L0.80\_N5      & 10{,}140.46 & 8.70\%   &  4.14 & --0.36\% \\
                             & --0.59\% \\
 \bottomrule
 \end{tabular}
-\caption{Backtest results on PT-sUSDE-27NOV2025 (60 days, 1{,}416
+\caption{Backtest results on PT-sUSDE-27NOV2025 (59 days, 1{,}416
 hourly observations). HoldSUSDe Sharpe omitted: the proxy yield series
 is constant by construction so the realised standard deviation
 \(\sigma \to 0\) and Sharpe diverges. All other Sharpes are computed
@@ -432,9 +432,15 @@ from hourly log-returns and annualised by
 \paragraph{Static loop.} Earns \(8.70\%\) APY against the
 unleveraged-PT baseline at \(7.11\%\) — a \(159\) bps premium that
 the closed-form formula (\ref{eq:apy}) at finite \(N=5\) predicts to
-be \( ((0.07 - 0.80\cdot0.065)/0.20) \cdot 3.36 / 5 \approx 6\%\)
-APY. The observed extra \(\sim\!270\) bps comes from
-\(r_b\) being below 6\% on parts of the window.
+be \(((r_{PT} - L\,r_b) / (1-L)) \cdot \rho_5/\rho_\infty\). Using
+window-average \(r_{PT}\approx 0.07\), \(r_b\approx 0.065\),
+\(L = 0.80\), \(\rho_5(0.80)/\rho_\infty = 0.672\), this evaluates to
+\(\approx\!6.05\%\) APY. The observed \(\sim\!265\) bps gap to
+\(8.70\%\) is consistent with the formula's first-order assumptions
+(constant rates, no carry-on-residual-cash); both \(r_{PT}\) and
+\(r_b\) drift inside the window, and the last cycle's unused
+borrow earns nothing in the formula but contributes a small linear
+term in the realised path.
 
 \paragraph{Dynamic loop.} Equity curve coincides exactly with the
 static loop (bit-identical \(1{,}416/1{,}416\) rows). The LTV stayed

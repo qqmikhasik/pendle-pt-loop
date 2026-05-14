@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 from fractal.core.base import Observation
 
+from pendle_pt_loop.entities import MorphoConfig
 from pendle_pt_loop.observations import build_observations
 from pendle_pt_loop.strategies import (
     HedgedLoopParams,
@@ -29,6 +30,9 @@ from pendle_pt_loop.strategies import (
     StaticLoopParams,
     StaticLoopStrategy,
 )
+
+# Real Morpho LLTV for PT-sUSDE / USDC market (see run_backtest.py).
+_REAL_LLTV: float = 0.915
 
 
 _DEFAULT_PENDLE_MARKET = "0xb6ac3d5da138918ac4e84441e924a20daa60dbdd"
@@ -128,13 +132,16 @@ def main() -> int:
 
     rows: list[dict] = []
 
+    morpho_cfg = MorphoConfig(market_id=_DEFAULT_MORPHO_MARKET, lltv=_REAL_LLTV)
+
     # Static loop reference run (no hedge).
     static = StaticLoopStrategy(
         params=StaticLoopParams(
             INITIAL_BALANCE=args.initial_balance,
             TARGET_LTV=args.target_ltv,
             N_CYCLES=args.n_cycles,
-        )
+        ),
+        morpho_config=morpho_cfg,
     )
     df_static = static.run(_filter_observations_for(static, observations)).to_dataframe()
     rows.append(_summary("StaticLoop", df_static, args.initial_balance, hedge_ratio=float("nan")))
@@ -147,7 +154,8 @@ def main() -> int:
                 TARGET_LTV=args.target_ltv,
                 N_CYCLES=args.n_cycles,
                 HEDGE_RATIO=ratio,
-            )
+            ),
+            morpho_config=morpho_cfg,
         )
         print(f"  running HedgedLoop HR={ratio:.2f}...", flush=True)
         df = strat.run(_filter_observations_for(strat, observations)).to_dataframe()

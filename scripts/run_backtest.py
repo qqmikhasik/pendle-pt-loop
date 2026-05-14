@@ -34,6 +34,7 @@ import numpy as np
 import pandas as pd
 from fractal.core.base import Observation
 
+from pendle_pt_loop.entities import MorphoConfig
 from pendle_pt_loop.observations import build_observations
 from pendle_pt_loop.strategies import (
     BaselineParams,
@@ -48,6 +49,12 @@ from pendle_pt_loop.strategies import (
     StaticLoopStrategy,
 )
 
+# Real Morpho parameter for the PT-sUSDE / USDC market — the
+# strategies' default MorphoConfig uses 0.86 which is fine for unit
+# tests, but the actual on-chain market we backtest against has
+# LLTV = 0.915. Always pass this explicitly through the live runner.
+_REAL_LLTV: float = 0.915
+
 
 # Defaults: PT-sUSDE-27NOV2025 on Ethereum mainnet. Cycle ran ~May 2025
 # to Nov 27 2025; data window picked deliberately to cover the meat of
@@ -59,7 +66,7 @@ DEFAULT_MORPHO_MARKET: str = (
     "0x05702edf1c4709808b62fe65a7d082dccc9386f858ae460ef207ec8dd1debfa2"
 )
 DEFAULT_MORPHO_CHAIN: str = "ethereum"
-DEFAULT_START: datetime = datetime(2025, 6, 1, tzinfo=UTC)
+DEFAULT_START: datetime = datetime(2025, 9, 29, tzinfo=UTC)
 DEFAULT_END: datetime = datetime(2025, 11, 27, tzinfo=UTC)
 DEFAULT_INITIAL_BALANCE: float = 10_000.0
 
@@ -274,21 +281,22 @@ def main() -> int:
         HEDGE_RATIO=args.hedge_ratio,
     )
 
+    morpho_cfg = MorphoConfig(market_id=args.morpho_market, lltv=_REAL_LLTV)
     strategies = [
         ("HoldUSDC", HoldUSDCStrategy(params=baseline_params)),
         ("HoldSUSDe", HoldSUSDeStrategy(params=baseline_params)),
         ("HoldPTNoLeverage", HoldPTNoLeverageStrategy(params=baseline_params)),
         (
             f"StaticLoop_LTV{args.target_ltv:.2f}_N{args.n_cycles}",
-            StaticLoopStrategy(params=loop_params),
+            StaticLoopStrategy(params=loop_params, morpho_config=morpho_cfg),
         ),
         (
             f"DynamicLoop_LTV{args.target_ltv:.2f}_N{args.n_cycles}",
-            DynamicLoopStrategy(params=dynamic_params),
+            DynamicLoopStrategy(params=dynamic_params, morpho_config=morpho_cfg),
         ),
         (
             f"HedgedLoop_LTV{args.target_ltv:.2f}_HR{args.hedge_ratio:.1f}",
-            HedgedLoopStrategy(params=hedged_params),
+            HedgedLoopStrategy(params=hedged_params, morpho_config=morpho_cfg),
         ),
     ]
 

@@ -256,7 +256,6 @@ class HedgedLoopStrategy(BaseStrategy[HedgedLoopParams]):
     def _unwind_with_hedge(self) -> list[ActionToTake]:
         pt = self._pt
         morpho = self._morpho
-        hedge = self._hedge
         collat = morpho._internal_state.collateral
         debt = morpho._internal_state.debt
 

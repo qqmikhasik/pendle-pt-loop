@@ -19,7 +19,7 @@ Framework: [`fractal-defi`](https://github.com/Logarithm-Labs/fractal-defi) v1.3
 ## Hypothesis
 
 The premium of a leveraged PT carry strategy over the risk-free rate
-(~10 percentage points per six months on Arbitrum at the time of writing)
+(~10 percentage points per six months on Ethereum mainnet at the time of writing)
 is fully explained by liquidation risk. An optimal dynamic LTV controller
 preserves the majority of carry while reducing maximum drawdown by an
 order of magnitude — the same qualitative result Krestenko *et al.* (2026)
@@ -57,7 +57,7 @@ All 7 development sessions delivered; 153 tests passing.
 | 6 | Funding-rate hedge variant + Sharpe/MaxDD metrics |
 | 7 | HEDGE_RATIO sweep + LaTeX whitepaper + Extra+1 PR plan |
 
-### Headline results (PT-sUSDE-27NOV2025, 60 days, 1,416 hourly obs)
+### Headline results (PT-sUSDE-27NOV2025, 59 days, 1,416 hourly obs)
 
 | Strategy | Final | APY | Sharpe | MaxDD |
 |---|---:|---:|---:|---:|

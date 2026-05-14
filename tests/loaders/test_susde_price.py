@@ -22,7 +22,6 @@ import requests
 
 from fractal.loaders.base_loader import LoaderType
 from fractal.loaders.binance import binance_client as _bc
-from pendle_pt_loop.loaders import susde_price as mod
 from pendle_pt_loop.loaders.susde_price import (
     BINANCE_REST_URL,
     PRIMARY_SYMBOL,

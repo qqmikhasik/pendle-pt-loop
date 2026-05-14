@@ -69,7 +69,7 @@ mlartifacts/
 
 # Build artifacts
 docs/_build/
-docs/litepaper.aux
-docs/litepaper.log
-docs/litepaper.out
-docs/litepaper.toc
+docs/whitepaper.aux
+docs/whitepaper.log
+docs/whitepaper.out
+docs/whitepaper.toc
