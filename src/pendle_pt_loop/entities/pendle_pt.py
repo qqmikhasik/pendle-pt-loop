@@ -136,7 +136,8 @@ class PendlePTGlobalState(GlobalState):
     Attributes:
         pt_price: Current market price of 1 PT in USDC.
             Pre-expiry: in :math:`(0, 1]`, monotonically approaching 1.
-            At/after expiry: exactly 1 (constant).
+            At/after expiry: exactly 1 (constant) in *SY units*; the
+            redeemed USDC value still depends on ``sy_price_in_usdc``.
         implied_yield: Annualised fixed yield baked into ``pt_price``
             at the moment of observation, in decimal (0.14 = 14% APY).
             Convenience only — derivable from ``pt_price`` and
@@ -146,12 +147,20 @@ class PendlePTGlobalState(GlobalState):
             unlocks. Drops to 0 at expiry, then stays 0.
         pool_liquidity: Total liquidity in the PT/SY Pendle pool, in
             USDC equivalent. Used to estimate slippage on swaps.
+        sy_price_in_usdc: Price of 1 unit of the underlying SY token
+            (sUSDe, weETH, USDe, …) in USDC. Used by ``action_redeem``
+            to convert PT face → USDC at expiry. Defaults to 1.0 so
+            existing tests behave identically (SY = stablecoin at peg).
+            When the underlying depegs, this captures the realised loss
+            on the SY-side at expiry — addresses the linear-pricing
+            limitation flagged in the original whitepaper.
     """
 
     pt_price: float = 1.0
     implied_yield: float = 0.0
     seconds_to_expiry: float = 0.0
     pool_liquidity: float = 0.0
+    sy_price_in_usdc: float = 1.0
 
 
 @dataclass
@@ -351,12 +360,15 @@ class PendlePTEntity(BaseEntity[PendlePTGlobalState, PendlePTInternalState]):
         self._internal_state.cash += usdc_received
 
     def action_redeem(self, amount_in_face: float) -> None:
-        """Redeem PT 1:1 for the underlying at/after expiry.
+        """Redeem PT for the underlying SY at/after expiry.
 
         Requires ``seconds_to_expiry == 0`` (enforced by
-        :meth:`update_state`). Converts at par into cash; the SY ->
-        USDC step is assumed 1:1 here (sUSDe peg modelling is a
-        downstream concern handled by the loader / strategy layer).
+        :meth:`update_state`). PT redeems 1:1 for SY at expiry; the
+        SY → USDC conversion happens at the prevailing SY price
+        carried on ``global_state.sy_price_in_usdc`` (defaults to 1.0,
+        which gives the old "stablecoin always at peg" behaviour). When
+        the underlying SY has depegged (e.g. USDe in December 2025 or
+        eETH in April 2024), redeem realises that loss correctly.
         """
         if amount_in_face < 0:
             raise EntityException(
@@ -373,6 +385,8 @@ class PendlePTEntity(BaseEntity[PendlePTGlobalState, PendlePTInternalState]):
                 f"{self._internal_state.pt_face_amount} PT held"
             )
 
-        # At expiry PT mints 1 SY which we treat as 1 USDC equivalent.
+        # Redeem PT → SY 1:1 (Pendle invariant), then SY → USDC at the
+        # prevailing SY market price.
+        sy_price = self._global_state.sy_price_in_usdc
         self._internal_state.pt_face_amount -= amount_in_face
-        self._internal_state.cash += amount_in_face
+        self._internal_state.cash += amount_in_face * sy_price

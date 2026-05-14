@@ -203,17 +203,31 @@ def run_cycle(cycle: CycleSpec) -> tuple[list[dict], list[Observation]]:
     print(f"\n=== {cycle.name} ({cycle.chain}) ===")
     print(f"    {cycle.start.date()} -> {cycle.end.date()}    {cycle.notes}")
 
-    obs, _ = build_observations(
+    # Two observation streams — one with raw Hyperliquid funding (the
+    # active-strategy hedge) and one with Boros-scaled funding (the
+    # passive Boros-buyer hedge). The PT/Morpho/sUSDe legs are identical.
+    obs_raw, _ = build_observations(
         start_time=cycle.start,
         end_time=cycle.end,
         pendle_market_address=cycle.pendle_market,
         pendle_expiry_timestamp=cycle.pendle_expiry,
         morpho_market_id=cycle.morpho_market,
         morpho_chain=cycle.chain,
+        hedge_scaling=1.0,
         with_run=True,
     )
-    print(f"    {len(obs)} hourly observations loaded")
-    if len(obs) == 0:
+    obs_boros, _ = build_observations(
+        start_time=cycle.start,
+        end_time=cycle.end,
+        pendle_market_address=cycle.pendle_market,
+        pendle_expiry_timestamp=cycle.pendle_expiry,
+        morpho_market_id=cycle.morpho_market,
+        morpho_chain=cycle.chain,
+        hedge_scaling=0.45,  # empirical Boros/Hyperliquid ratio
+        with_run=True,
+    )
+    print(f"    {len(obs_raw)} hourly observations loaded")
+    if len(obs_raw) == 0:
         print(f"    SKIP — no data")
         return [], []
 
@@ -231,25 +245,39 @@ def run_cycle(cycle: CycleSpec) -> tuple[list[dict], list[Observation]]:
         N_CYCLES=N_CYCLES, HEDGE_RATIO=1.0,
     )
 
-    strategies = [
+    rows: list[dict] = []
+    # Strategies that don't use the hedge slot — run once on raw obs.
+    for name, strat in [
         ("PTNoLev", HoldPTNoLeverageStrategy(params=baseline_params)),
         ("Static", StaticLoopStrategy(
             params=static_params, morpho_config=morpho_cfg, gas_model=gas)),
         ("Dynamic", DynamicLoopStrategy(
             params=dynamic_params, morpho_config=morpho_cfg, gas_model=gas)),
-        ("Hedged", HedgedLoopStrategy(
-            params=hedged_params, morpho_config=morpho_cfg, gas_model=gas)),
-    ]
-
-    rows: list[dict] = []
-    for name, strat in strategies:
-        m = _run_strategy(strat, obs, INITIAL_BALANCE, name)
+    ]:
+        m = _run_strategy(strat, obs_raw, INITIAL_BALANCE, name)
         m["cycle"] = cycle.name
         m["chain"] = cycle.chain
         rows.append(m)
-        print(f"    {name:<8} ${m['final']:>10,.2f}  APY {m['apy']:+.4f}  "
+        print(f"    {name:<14} ${m['final']:>10,.2f}  APY {m['apy']:+.4f}  "
               f"Sharpe {m['sharpe']:+6.2f}  MDD {m['max_drawdown']:+.4f}")
-    return rows, obs
+
+    # Hedged strategy run twice — once with raw Hyperliquid funding
+    # (active assumption) and once with damped funding (Boros proxy).
+    for hedge_name, hedge_obs in [
+        ("Hedged-Active", obs_raw),
+        ("Hedged-Boros", obs_boros),
+    ]:
+        strat = HedgedLoopStrategy(
+            params=hedged_params, morpho_config=morpho_cfg, gas_model=gas
+        )
+        m = _run_strategy(strat, hedge_obs, INITIAL_BALANCE, hedge_name)
+        m["cycle"] = cycle.name
+        m["chain"] = cycle.chain
+        rows.append(m)
+        print(f"    {hedge_name:<14} ${m['final']:>10,.2f}  APY {m['apy']:+.4f}  "
+              f"Sharpe {m['sharpe']:+6.2f}  MDD {m['max_drawdown']:+.4f}")
+
+    return rows, obs_raw
 
 
 # ====================================================================

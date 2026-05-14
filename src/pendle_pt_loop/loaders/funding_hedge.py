@@ -90,11 +90,14 @@ class FundingHedgeLoader(Loader):
         start_time: datetime,
         end_time: datetime,
         *,
+        scaling: float = 1.0,
         loader_type: LoaderType = LoaderType.CSV,
     ) -> None:
         super().__init__(loader_type=loader_type)
         if not isinstance(ticker, str) or not ticker:
             raise ValueError(f"ticker must be a non-empty string, got {ticker!r}")
+        if scaling < 0.0:
+            raise ValueError(f"scaling must be non-negative, got {scaling}")
         start = to_utc(start_time)
         end = to_utc(end_time)
         if start is None or end is None:
@@ -104,6 +107,13 @@ class FundingHedgeLoader(Loader):
         self.ticker: str = ticker
         self.start_time: datetime = start
         self.end_time: datetime = end
+        # ``scaling=1.0`` (default) emits the raw Hyperliquid funding rate
+        # — appropriate when the user actively shorts the perp themselves.
+        # ``scaling<1.0`` synthesises a Boros-equivalent rate by damping
+        # the raw funding stream. Empirical Boros/Hyperliquid ratio
+        # observed mid-2026 ≈ 0.4–0.5; use 0.45 for a realistic Boros proxy.
+        # See ``scripts/validate_boros_proxy.py`` for the measurement.
+        self.scaling: float = float(scaling)
         # Inner loader is built lazily so tests can monkeypatch the
         # ``HyperliquidFundingRatesLoader`` symbol on the module before
         # we instantiate it.
@@ -148,13 +158,22 @@ class FundingHedgeLoader(Loader):
         self._raw = inner.read(with_run=True)
 
     def transform(self) -> None:
-        """Convert ``FundingHistory`` to the two-column annualised frame."""
+        """Convert ``FundingHistory`` to the two-column annualised frame.
+
+        Applies the configured ``scaling`` factor to both the hourly
+        and annualised rates. ``scaling=1.0`` (default) returns the
+        raw Hyperliquid funding rate (active-strategy assumption);
+        ``scaling<1.0`` synthesises a Boros-equivalent rate by damping
+        towards the mean.
+        """
         raw = self._raw
         if raw is None or len(raw) == 0:
             self._data = self._empty_frame()
             return
         idx = pd.to_datetime(raw.index, utc=True)
-        hourly = pd.Series(raw["rate"].astype(float).to_numpy(), index=idx)
+        hourly = pd.Series(
+            raw["rate"].astype(float).to_numpy() * self.scaling, index=idx
+        )
         df = pd.DataFrame(
             {
                 "funding_rate_hourly": hourly,

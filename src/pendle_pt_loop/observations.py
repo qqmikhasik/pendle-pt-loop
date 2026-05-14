@@ -65,6 +65,7 @@ def build_observations(
     morpho_chain: str = "ethereum",
     susde_source: str = "binance",
     hedge_ticker: str | None = "ETH",
+    hedge_scaling: float = 1.0,
     api_key: str | None = None,
     loader_type: LoaderType = LoaderType.CSV,
     with_run: bool = True,
@@ -131,6 +132,7 @@ def build_observations(
                 ticker=hedge_ticker,
                 start_time=start_time,
                 end_time=end_time,
+                scaling=hedge_scaling,
                 loader_type=loader_type,
             )
             hedge_df = hedge_loader.read(with_run=with_run)
@@ -184,6 +186,14 @@ def _join_and_pack(
             hedge_row=(
                 hedge_aligned.loc[ts] if hedge_aligned is not None else None
             ),
+            sy_price=float(susde_aligned.loc[ts, "price"])
+            if (
+                susde_aligned is not None
+                and not susde_aligned.empty
+                and ts in susde_aligned.index
+                and "price" in susde_aligned.columns
+            )
+            else 1.0,
         )
         for ts, row in joined.iterrows()
     ]
@@ -194,11 +204,15 @@ def _row_to_observation(
     ts: pd.Timestamp,
     row: pd.Series,
     hedge_row: pd.Series | None = None,
+    sy_price: float = 1.0,
 ) -> Observation:
     """One hourly row → one ``Observation``.
 
     If ``hedge_row`` is provided, a ``HEDGE`` slot is added carrying
     a ``FundingHedgeGlobalState`` with the annualised funding rate.
+    ``sy_price`` (defaulting to 1.0) is plumbed into
+    ``PendlePTGlobalState.sy_price_in_usdc`` so the redeem step can
+    realise underlying-depeg losses correctly.
     """
     ts_seconds = ts.timestamp() if hasattr(ts, "timestamp") else float(ts)
     pt_state = PendlePTGlobalState(
@@ -206,6 +220,7 @@ def _row_to_observation(
         implied_yield=float(row["implied_yield"]),
         seconds_to_expiry=float(row["seconds_to_expiry"]),
         pool_liquidity=float(row["pool_liquidity"]),
+        sy_price_in_usdc=float(sy_price),
     )
     morpho_state = MorphoGlobalState(
         collateral_price=float(row["pt_price"]),
