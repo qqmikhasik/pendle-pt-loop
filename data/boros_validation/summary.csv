@@ -1,0 +1,2 @@
+window_start,window_end,n_observations,pearson_correlation,mean_absolute_spread,bias_mark_minus_funding,rmse
+2026-04-23T12:00:00+00:00,2026-05-14T12:00:00+00:00,499,0.4664852149402753,0.05839342379746129,-0.030182922305848743,0.06483919898487019

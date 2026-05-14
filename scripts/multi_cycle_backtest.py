@@ -114,6 +114,24 @@ CYCLES: list[CycleSpec] = [
         end=datetime(2025, 12, 11, tzinfo=UTC),
         notes="same USDe cycle on BASE — compare gas impact L2 vs Arb vs mainnet",
     ),
+    # ---- Stress-cycle: PT-weETH-27JUN2024 lived through eETH depeg in
+    # April-May 2024 (a notable Liquid-Restaking-Token crisis). PT-cycle's
+    # implied APY swung 0% → 32% during the window — real volatility,
+    # not the calm we saw in 2025-2026 cycles.
+    #
+    # The Morpho loan asset is USDA (Angle stablecoin), not USDC; we
+    # treat it as a $1 stable equivalent for backtest. Real USDA-USDC
+    # spread is sub-1% — within model noise.
+    CycleSpec(
+        name="weETH-27JUN2024@Eth-stress",
+        chain="ethereum",
+        pendle_market="0xf32e58f92e60f4b0a37a69b95d642a471365eae8",
+        pendle_expiry=int(datetime(2024, 6, 27, tzinfo=UTC).timestamp()),
+        morpho_market="0xcc7b191903e4750ad71898a1594d912adbb5bb1c6effcde9c38f0a798112edd1",
+        start=datetime(2024, 4, 28, tzinfo=UTC),
+        end=datetime(2024, 6, 27, tzinfo=UTC),
+        notes="LRT volatility / eETH depeg — STRESS CYCLE, loan=USDA (≈USDC)",
+    ),
 ]
 
 
