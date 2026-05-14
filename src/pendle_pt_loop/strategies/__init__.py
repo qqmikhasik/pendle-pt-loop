@@ -36,6 +36,10 @@ from pendle_pt_loop.strategies.dynamic_loop import (
     DynamicLoopParams,
     DynamicLoopStrategy,
 )
+from pendle_pt_loop.strategies.hedged_loop import (
+    HedgedLoopParams,
+    HedgedLoopStrategy,
+)
 from pendle_pt_loop.strategies.static_loop import (
     StaticLoopParams,
     StaticLoopStrategy,
@@ -45,6 +49,8 @@ __all__ = [
     "BaselineParams",
     "DynamicLoopParams",
     "DynamicLoopStrategy",
+    "HedgedLoopParams",
+    "HedgedLoopStrategy",
     "HoldPTNoLeverageStrategy",
     "HoldSUSDeStrategy",
     "HoldUSDCStrategy",

@@ -37,19 +37,22 @@ from fractal.core.base import Observation
 from fractal.loaders.base_loader import LoaderType
 
 from pendle_pt_loop.entities import (
+    FundingHedgeGlobalState,
     MorphoGlobalState,
     PendlePTGlobalState,
 )
 from pendle_pt_loop.loaders import (
+    FundingHedgeLoader,
     MorphoMarketLoader,
     PendleMarketLoader,
     SUSDePriceLoader,
 )
 
-# Entity slot names. Must match the ``NamedEntity`` names that the
-# strategy registers in its ``set_up`` hook (Session 4).
+# Entity slot names. Must match the ``NamedEntity`` names that strategies
+# register in their ``set_up`` hook.
 PT_SLOT: str = "PT"
 MORPHO_SLOT: str = "MORPHO"
+HEDGE_SLOT: str = "HEDGE"
 
 
 def build_observations(
@@ -61,6 +64,7 @@ def build_observations(
     morpho_market_id: str,
     morpho_chain: str = "ethereum",
     susde_source: str = "binance",
+    hedge_ticker: str | None = "ETH",
     api_key: str | None = None,
     loader_type: LoaderType = LoaderType.CSV,
     with_run: bool = True,
@@ -117,16 +121,37 @@ def build_observations(
     morpho_df = morpho.read(with_run=with_run)
     susde_df = susde.read(with_run=with_run)
 
-    return _join_and_pack(pendle_df, morpho_df, susde_df)
+    hedge_df: pd.DataFrame | None = None
+    if hedge_ticker is not None:
+        try:
+            hedge_loader = FundingHedgeLoader(
+                ticker=hedge_ticker,
+                start_time=start_time,
+                end_time=end_time,
+                loader_type=loader_type,
+            )
+            hedge_df = hedge_loader.read(with_run=with_run)
+        except Exception:
+            # Hyperliquid public-info API can be flaky; gracefully skip
+            # the hedge feed and let any hedge-using strategy fail loud.
+            hedge_df = None
+
+    return _join_and_pack(pendle_df, morpho_df, susde_df, hedge_df)
 
 
 def _join_and_pack(
     pendle_df: pd.DataFrame,
     morpho_df: pd.DataFrame,
     susde_df: pd.DataFrame,
+    hedge_df: pd.DataFrame | None = None,
 ) -> tuple[list[Observation], pd.DataFrame]:
     """Pure join + Observation construction. Separated from the loader
-    plumbing so the unit tests can exercise it with hand-built frames."""
+    plumbing so the unit tests can exercise it with hand-built frames.
+
+    When ``hedge_df`` is provided and non-empty, each ``Observation``
+    gains a ``HEDGE`` slot carrying a ``FundingHedgeGlobalState`` with
+    the annualised funding rate at that hour.
+    """
     if pendle_df.empty or morpho_df.empty:
         return [], susde_df
 
@@ -143,14 +168,35 @@ def _join_and_pack(
     # spot price into any hourly slot Binance happens to skip).
     susde_aligned = susde_df.reindex(joined.index, method="ffill")
 
+    hedge_aligned: pd.DataFrame | None = None
+    if hedge_df is not None and not hedge_df.empty:
+        hedge_aligned = hedge_df.sort_index().ffill().reindex(
+            joined.index, method="ffill"
+        )
+
     observations: list[Observation] = [
-        _row_to_observation(ts, row) for ts, row in joined.iterrows()
+        _row_to_observation(
+            ts,
+            row,
+            hedge_row=(
+                hedge_aligned.loc[ts] if hedge_aligned is not None else None
+            ),
+        )
+        for ts, row in joined.iterrows()
     ]
     return observations, susde_aligned
 
 
-def _row_to_observation(ts: pd.Timestamp, row: pd.Series) -> Observation:
-    """One hourly row → one ``Observation``."""
+def _row_to_observation(
+    ts: pd.Timestamp,
+    row: pd.Series,
+    hedge_row: pd.Series | None = None,
+) -> Observation:
+    """One hourly row → one ``Observation``.
+
+    If ``hedge_row`` is provided, a ``HEDGE`` slot is added carrying
+    a ``FundingHedgeGlobalState`` with the annualised funding rate.
+    """
     ts_seconds = ts.timestamp() if hasattr(ts, "timestamp") else float(ts)
     pt_state = PendlePTGlobalState(
         pt_price=float(row["pt_price"]),
@@ -166,10 +212,16 @@ def _row_to_observation(ts: pd.Timestamp, row: pd.Series) -> Observation:
         utilization=float(row["utilization"]),
         timestamp_seconds=ts_seconds,
     )
+    states: dict[str, Any] = {PT_SLOT: pt_state, MORPHO_SLOT: morpho_state}
+    if hedge_row is not None:
+        states[HEDGE_SLOT] = FundingHedgeGlobalState(
+            funding_rate=float(hedge_row["funding_rate_annualised"]),
+            timestamp_seconds=ts_seconds,
+        )
     return Observation(
         timestamp=ts.to_pydatetime() if isinstance(ts, pd.Timestamp) else ts,
-        states={PT_SLOT: pt_state, MORPHO_SLOT: morpho_state},
+        states=states,
     )
 
 
-__all__ = ["build_observations", "PT_SLOT", "MORPHO_SLOT"]
+__all__ = ["build_observations", "PT_SLOT", "MORPHO_SLOT", "HEDGE_SLOT"]

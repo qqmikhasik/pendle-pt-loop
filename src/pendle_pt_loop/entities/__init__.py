@@ -10,6 +10,12 @@ In Session 1 these are stubs — interfaces nailed down, math marked
 ``TODO(Session 2)``.
 """
 
+from pendle_pt_loop.entities.funding_hedge import (
+    FundingHedgeConfig,
+    FundingHedgeEntity,
+    FundingHedgeGlobalState,
+    FundingHedgeInternalState,
+)
 from pendle_pt_loop.entities.morpho import (
     MorphoConfig,
     MorphoEntity,
@@ -24,6 +30,10 @@ from pendle_pt_loop.entities.pendle_pt import (
 )
 
 __all__ = [
+    "FundingHedgeConfig",
+    "FundingHedgeEntity",
+    "FundingHedgeGlobalState",
+    "FundingHedgeInternalState",
     "MorphoConfig",
     "MorphoEntity",
     "MorphoGlobalState",

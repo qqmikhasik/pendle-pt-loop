@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from fractal.core.base import Observation
 
@@ -38,6 +39,8 @@ from pendle_pt_loop.strategies import (
     BaselineParams,
     DynamicLoopParams,
     DynamicLoopStrategy,
+    HedgedLoopParams,
+    HedgedLoopStrategy,
     HoldPTNoLeverageStrategy,
     HoldSUSDeStrategy,
     HoldUSDCStrategy,
@@ -72,6 +75,8 @@ class StrategyResult:
     net_pnl: float
     total_return: float
     apy: float
+    sharpe: float
+    max_drawdown: float
 
     @classmethod
     def from_dataframe(
@@ -83,10 +88,30 @@ class StrategyResult:
         duration_days = (end_ts - start_ts).total_seconds() / 86400.0
         years = duration_days / 365.25 if duration_days > 0 else 1e-9
         total_return = final / initial - 1.0
-        # Use simple (not compounded) annualisation for legibility in the
-        # summary table; the StrategyResult.get_default_metrics() also
-        # reports a different convention if needed.
         apy = total_return / years
+
+        # Sharpe ratio: annualised. Filter non-positive equity points —
+        # leveraged loop strategies show transient zero / NaN balance
+        # during the open step before the engine commits all queued
+        # actions; including them in the return series produces nonsense.
+        equity_raw = df["net_balance"].astype(float).to_numpy()
+        equity = equity_raw[np.isfinite(equity_raw) & (equity_raw > 0)]
+        if len(equity) < 2 or initial <= 0:
+            sharpe = 0.0
+            max_drawdown = 0.0
+        else:
+            hourly_returns = np.diff(equity) / equity[:-1]
+            sigma = float(np.std(hourly_returns, ddof=1)) if len(hourly_returns) > 1 else 0.0
+            if sigma <= 0:
+                sharpe = 0.0
+            else:
+                mu = float(np.mean(hourly_returns))
+                hours_per_year = 365.25 * 24.0
+                sharpe = (mu / sigma) * (hours_per_year ** 0.5)
+            running_max = np.maximum.accumulate(equity)
+            drawdowns = (equity - running_max) / running_max
+            max_drawdown = float(drawdowns.min())
+
         return cls(
             name=name,
             initial_balance=initial,
@@ -95,24 +120,23 @@ class StrategyResult:
             net_pnl=final - initial,
             total_return=total_return,
             apy=apy,
+            sharpe=sharpe,
+            max_drawdown=max_drawdown,
         )
 
 
 def _print_summary(results: list[StrategyResult]) -> None:
-    rows = [
-        f"  {r.name:<26}  ${r.final_balance:>11,.2f}  "
-        f"{r.total_return:+.4f}  {r.apy:+.4f}  "
-        f"PnL ${r.net_pnl:+,.2f}"
-        for r in results
-    ]
     print()
     print(
-        f"  {'Strategy':<26}  {'Final':>12}  "
-        f"{'TotalRet':>8}  {'APY':>8}  {'PnL':>14}"
+        f"  {'Strategy':<32}  {'Final':>12}  "
+        f"{'APY':>8}  {'Sharpe':>7}  {'MaxDD':>8}"
     )
-    print("  " + "-" * 78)
-    for row in rows:
-        print(row)
+    print("  " + "-" * 80)
+    for r in results:
+        print(
+            f"  {r.name:<32}  ${r.final_balance:>11,.2f}  "
+            f"{r.apy:+.4f}  {r.sharpe:+7.3f}  {r.max_drawdown:+.4f}"
+        )
     print()
 
 
@@ -182,6 +206,12 @@ def main() -> int:
         "--n-cycles", type=int, default=5, help="Number of loop cycles"
     )
     parser.add_argument(
+        "--hedge-ratio",
+        type=float,
+        default=1.0,
+        help="HedgedLoopStrategy hedge notional / PT collateral notional",
+    )
+    parser.add_argument(
         "--from-cache",
         type=Path,
         default=None,
@@ -237,6 +267,12 @@ def main() -> int:
         TARGET_LTV=args.target_ltv,
         N_CYCLES=args.n_cycles,
     )
+    hedged_params = HedgedLoopParams(
+        INITIAL_BALANCE=args.initial_balance,
+        TARGET_LTV=args.target_ltv,
+        N_CYCLES=args.n_cycles,
+        HEDGE_RATIO=args.hedge_ratio,
+    )
 
     strategies = [
         ("HoldUSDC", HoldUSDCStrategy(params=baseline_params)),
@@ -249,6 +285,10 @@ def main() -> int:
         (
             f"DynamicLoop_LTV{args.target_ltv:.2f}_N{args.n_cycles}",
             DynamicLoopStrategy(params=dynamic_params),
+        ),
+        (
+            f"HedgedLoop_LTV{args.target_ltv:.2f}_HR{args.hedge_ratio:.1f}",
+            HedgedLoopStrategy(params=hedged_params),
         ),
     ]
 
