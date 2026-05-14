@@ -43,15 +43,31 @@ pendle-pt-loop/
 └── data/                # Loader caches (gitignored)
 ```
 
-## Status
+## Status — complete
 
-- **Session 1 (current):** repo scaffold, entity stubs, smoke test. Done.
-- Session 2: Pendle / Morpho real math.
-- Session 3: Data loaders.
-- Session 4: Baselines + static strategy + first backtest.
-- Session 5: Dynamic LTV controller.
-- Session 6: Boros hedge variant.
-- Session 7: Whitepaper + GitHub push + PR to fractal-defi (Extra+1).
+All 7 development sessions delivered; 153 tests passing.
+
+| Session | Deliverable |
+|---|---|
+| 1 | Repo scaffold + entity stubs + smoke tests |
+| 2 | Real Pendle/Morpho math + invariant tests |
+| 3 | Pendle / Morpho / sUSDe loaders + observation builder |
+| 4 | Baselines (3) + static loop + first live backtest |
+| 5 | Dynamic LTV controller (first-passage probability + asymmetric band) |
+| 6 | Funding-rate hedge variant + Sharpe/MaxDD metrics |
+| 7 | HEDGE_RATIO sweep + LaTeX whitepaper + Extra+1 PR plan |
+
+### Headline results (PT-sUSDE-27NOV2025, 60 days, 1,416 hourly obs)
+
+| Strategy | Final | APY | Sharpe | MaxDD |
+|---|---:|---:|---:|---:|
+| HoldUSDC | $10,000 | 0.00% | 0.00 | 0.00% |
+| HoldPTNoLeverage | $10,114.79 | +7.11% | 9.91 | −0.10% |
+| StaticLoop_LTV0.80_N5 | $10,140.46 | +8.70% | 4.14 | −0.36% |
+| DynamicLoop_LTV0.80_N5 | $10,140.46 | +8.70% | 4.14 | −0.36% |
+| **HedgedLoop_LTV0.80_HR1.0** | **$10,549.70** | **+34.05%** | **13.28** | −0.59% |
+
+The whitepaper is at [`docs/whitepaper.pdf`](docs/whitepaper.pdf).
 
 ## Local setup
 
