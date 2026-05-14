@@ -94,11 +94,14 @@ def build_observations(
         the list ready for ``strategy.run(observations)`` and
         ``susde_price_df`` is the aligned price series.
     """
+    # Map chain name to id for Pendle's URL routing.
+    _chain_id_map = {"ethereum": 1, "arbitrum": 42161, "base": 8453}
     pendle = PendleMarketLoader(
         market_address=pendle_market_address,
         expiry_timestamp=pendle_expiry_timestamp,
         start_time=start_time,
         end_time=end_time,
+        chain_id=_chain_id_map.get(morpho_chain, 1),
         api_key=api_key,
         loader_type=loader_type,
     )

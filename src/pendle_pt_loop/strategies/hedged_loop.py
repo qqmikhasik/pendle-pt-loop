@@ -97,12 +97,15 @@ class HedgedLoopStrategy(BaseStrategy[HedgedLoopParams]):
         pt_config: PendlePTConfig | None = None,
         morpho_config: MorphoConfig | None = None,
         hedge_config: FundingHedgeConfig | None = None,
+        gas_model: "GasModel | None" = None,
         params: HedgedLoopParams | dict | None = None,
         debug: bool = False,
     ) -> None:
         self._pt_config = pt_config
         self._morpho_config = morpho_config
         self._hedge_config = hedge_config
+        from pendle_pt_loop.costs import GasModel
+        self._gas_model = gas_model or GasModel.zero()
         super().__init__(params=params, debug=debug)
 
     def set_up(self) -> None:
@@ -165,15 +168,21 @@ class HedgedLoopStrategy(BaseStrategy[HedgedLoopParams]):
 
     def _open_loop_with_hedge(self) -> list[ActionToTake]:
         pt_price = self._pt.global_state.pt_price
-        face_per_cycle, borrow_per_cycle = self._plan_cycles(pt_price)
+        # Subtract open-cycle gas from starting capital (paid up-front).
+        capital_after_gas = (
+            self._params.INITIAL_BALANCE - self._gas_model.open_cost_usdc
+        )
+        face_per_cycle, borrow_per_cycle = self._plan_cycles(
+            pt_price, capital_after_gas
+        )
         total_face = sum(face_per_cycle)
         # Pre-debit PT face we will buy across all cycles (tech-debt #1).
         self._pt._internal_state.pt_face_amount -= total_face
 
         actions: list[ActionToTake] = [
-            self._pt_deposit(self._params.INITIAL_BALANCE)
+            self._pt_deposit(capital_after_gas)
         ]
-        cycle_capital = self._params.INITIAL_BALANCE
+        cycle_capital = capital_after_gas
         for face_received, borrow_amount in zip(face_per_cycle, borrow_per_cycle):
             actions.extend(
                 self._cycle_actions(cycle_capital, face_received, borrow_amount)
@@ -193,14 +202,18 @@ class HedgedLoopStrategy(BaseStrategy[HedgedLoopParams]):
                     ),
                 )
             )
+        # Gas deducted up-front via capital_after_gas above.
         return actions
 
     def _plan_cycles(
-        self, pt_price: float
+        self, pt_price: float, starting_capital: float | None = None
     ) -> tuple[list[float], list[float]]:
         face_per_cycle: list[float] = []
         borrow_per_cycle: list[float] = []
-        cycle_capital = self._params.INITIAL_BALANCE
+        cycle_capital = (
+            starting_capital if starting_capital is not None
+            else self._params.INITIAL_BALANCE
+        )
         for _ in range(self._params.N_CYCLES):
             face = self._estimate_pt_face_received(cycle_capital, pt_price)
             collat_value = face * pt_price
@@ -282,6 +295,10 @@ class HedgedLoopStrategy(BaseStrategy[HedgedLoopParams]):
         # Close hedge — withdraw notional. Realised PnL stays on
         # hedge.accrued_pnl, contributing to total equity via balance.
         actions.append(self._hedge_close())
+
+        # Pay unwind gas / friction (open + close of both loop and hedge).
+        if self._gas_model.unwind_cost_usdc > 0:
+            pt._internal_state.cash -= self._gas_model.unwind_cost_usdc
 
         self._state = "unwound"
         return actions

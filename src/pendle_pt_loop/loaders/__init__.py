@@ -22,12 +22,14 @@ join the three feeds into a list of ``fractal.core.base.Observation``
 ready to be passed into a strategy's ``run`` loop.
 """
 
+from pendle_pt_loop.loaders.boros import BorosMarketLoader
 from pendle_pt_loop.loaders.funding_hedge import FundingHedgeLoader
 from pendle_pt_loop.loaders.morpho import MorphoMarketLoader
 from pendle_pt_loop.loaders.pendle import PendleMarketLoader
 from pendle_pt_loop.loaders.susde_price import SUSDePriceLoader
 
 __all__ = [
+    "BorosMarketLoader",
     "FundingHedgeLoader",
     "MorphoMarketLoader",
     "PendleMarketLoader",

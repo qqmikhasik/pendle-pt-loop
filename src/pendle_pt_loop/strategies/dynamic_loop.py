@@ -111,11 +111,14 @@ class DynamicLoopStrategy(BaseStrategy[DynamicLoopParams]):
         *,
         pt_config: PendlePTConfig | None = None,
         morpho_config: MorphoConfig | None = None,
+        gas_model: "GasModel | None" = None,
         params: DynamicLoopParams | dict | None = None,
         debug: bool = False,
     ) -> None:
         self._pt_config = pt_config
         self._morpho_config = morpho_config
+        from pendle_pt_loop.costs import GasModel
+        self._gas_model = gas_model or GasModel.zero()
         super().__init__(params=params, debug=debug)
 
     # ------------------------------------------------------------------
@@ -206,14 +209,21 @@ class DynamicLoopStrategy(BaseStrategy[DynamicLoopParams]):
 
     def _open_loop(self) -> list[ActionToTake]:
         pt_price = self._pt.global_state.pt_price
-        face_per_cycle, borrow_per_cycle = self._plan_cycles(pt_price)
+        # Subtract open-cycle gas from starting capital (paid out of
+        # the same account that funded the strategy).
+        capital_after_gas = (
+            self._params.INITIAL_BALANCE - self._gas_model.open_cost_usdc
+        )
+        face_per_cycle, borrow_per_cycle = self._plan_cycles(
+            pt_price, capital_after_gas
+        )
         # Pre-debit PT face we will buy across all cycles; tech-debt #1.
         self._pt._internal_state.pt_face_amount -= sum(face_per_cycle)
 
         actions: list[ActionToTake] = [
-            self._pt_deposit_action(self._params.INITIAL_BALANCE)
+            self._pt_deposit_action(capital_after_gas)
         ]
-        cycle_capital = self._params.INITIAL_BALANCE
+        cycle_capital = capital_after_gas
         for face_received, borrow_amount in zip(face_per_cycle, borrow_per_cycle):
             actions.extend(
                 self._cycle_actions(cycle_capital, face_received, borrow_amount)
@@ -222,11 +232,14 @@ class DynamicLoopStrategy(BaseStrategy[DynamicLoopParams]):
         return actions
 
     def _plan_cycles(
-        self, pt_price: float
+        self, pt_price: float, starting_capital: float | None = None
     ) -> tuple[list[float], list[float]]:
         face_per_cycle: list[float] = []
         borrow_per_cycle: list[float] = []
-        cycle_capital = self._params.INITIAL_BALANCE
+        cycle_capital = (
+            starting_capital if starting_capital is not None
+            else self._params.INITIAL_BALANCE
+        )
         for _ in range(self._params.N_CYCLES):
             face = self._estimate_pt_face_received(cycle_capital, pt_price)
             collat_value = face * pt_price
@@ -378,6 +391,10 @@ class DynamicLoopStrategy(BaseStrategy[DynamicLoopParams]):
         repay_amount = sold_face * pt_price
         repay_amount = min(repay_amount, morpho._internal_state.debt)
 
+        # Charge per-rebalance gas.
+        if self._gas_model.rebalance_cost_usdc > 0:
+            self._pt._internal_state.cash -= self._gas_model.rebalance_cost_usdc
+
         return [
             ActionToTake(
                 entity_name=PT_SLOT,
@@ -437,6 +454,10 @@ class DynamicLoopStrategy(BaseStrategy[DynamicLoopParams]):
         # Pre-debit (tech-debt #1).
         self._pt._internal_state.pt_face_amount -= face_received
 
+        # Charge per-rebalance gas.
+        if self._gas_model.rebalance_cost_usdc > 0:
+            self._pt._internal_state.cash -= self._gas_model.rebalance_cost_usdc
+
         return [
             ActionToTake(
                 entity_name=MORPHO_SLOT,
@@ -480,6 +501,8 @@ class DynamicLoopStrategy(BaseStrategy[DynamicLoopParams]):
         ]
         pt._internal_state.cash -= debt
         morpho._internal_state.debt = 0.0
+        if self._gas_model.unwind_cost_usdc > 0:
+            pt._internal_state.cash -= self._gas_model.unwind_cost_usdc
         self._state = "unwound"
         return actions
 

@@ -146,6 +146,7 @@ class StaticLoopStrategy(BaseStrategy[StaticLoopParams]):
         *,
         pt_config: PendlePTConfig | None = None,
         morpho_config: MorphoConfig | None = None,
+        gas_model: "GasModel | None" = None,
         params: StaticLoopParams | dict | None = None,
         debug: bool = False,
     ) -> None:
@@ -155,6 +156,11 @@ class StaticLoopStrategy(BaseStrategy[StaticLoopParams]):
         # LLTV that may differ from the live market.
         self._pt_config = pt_config
         self._morpho_config = morpho_config
+        # Default to zero-friction so the existing unit tests pass as-is;
+        # live runners (run_backtest.py, multi_cycle_backtest.py) pass a
+        # network-specific model.
+        from pendle_pt_loop.costs import GasModel
+        self._gas_model = gas_model or GasModel.zero()
         super().__init__(params=params, debug=debug)
 
     # ------------------------------------------------------------------
@@ -255,17 +261,45 @@ class StaticLoopStrategy(BaseStrategy[StaticLoopParams]):
         keeps ``action_buy_pt``'s cash sufficiency check happy.
         """
         pt_price = self._pt.global_state.pt_price
-        face_per_cycle, borrow_per_cycle = self._plan_cycles(pt_price)
+        # Subtract open-cycle gas from the available capital up-front:
+        # we cannot fund the first buy_pt with more than what survives
+        # gas. Mathematically equivalent to paying gas out of the same
+        # account that funded the strategy.
+        capital_after_gas = (
+            self._params.INITIAL_BALANCE - self._gas_model.open_cost_usdc
+        )
+        face_per_cycle, borrow_per_cycle = self._plan_cycles_from(
+            pt_price, capital_after_gas
+        )
         self._pre_debit_pt_face(sum(face_per_cycle))
 
-        actions: list[ActionToTake] = [self._deposit_action(self._params.INITIAL_BALANCE)]
-        cycle_capital = self._params.INITIAL_BALANCE
+        actions: list[ActionToTake] = [self._deposit_action(capital_after_gas)]
+        cycle_capital = capital_after_gas
         for face_received, borrow_amount in zip(face_per_cycle, borrow_per_cycle):
             actions.extend(self._cycle_actions(cycle_capital, face_received, borrow_amount))
             cycle_capital = borrow_amount
 
         self._state = "open"
         return actions
+
+    def _plan_cycles_from(
+        self, pt_price: float, starting_capital: float
+    ) -> tuple[list[float], list[float]]:
+        """Like ``_plan_cycles`` but starts from a custom capital figure
+        (used to thread the gas-deducted capital through the planner)."""
+        face_per_cycle: list[float] = []
+        borrow_per_cycle: list[float] = []
+        cycle_capital = starting_capital
+        for _ in range(self._params.N_CYCLES):
+            face_received = self._estimate_pt_face_received(
+                cycle_capital, pt_price
+            )
+            collat_value_added = face_received * pt_price
+            borrow_amount = self._params.TARGET_LTV * collat_value_added
+            face_per_cycle.append(face_received)
+            borrow_per_cycle.append(borrow_amount)
+            cycle_capital = borrow_amount
+        return face_per_cycle, borrow_per_cycle
 
     def _plan_cycles(
         self, pt_price: float
@@ -441,6 +475,10 @@ class StaticLoopStrategy(BaseStrategy[StaticLoopParams]):
         # external "USDC wallet" entity. Session 5/6 cleanup.
         pt._internal_state.cash -= debt
         morpho._internal_state.debt = 0.0
+
+        # Pay unwind gas / friction.
+        if self._gas_model.unwind_cost_usdc > 0:
+            pt._internal_state.cash -= self._gas_model.unwind_cost_usdc
 
         self._state = "unwound"
         return actions
