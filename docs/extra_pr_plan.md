@@ -1,5 +1,12 @@
 # Extra+1: PR plan — Pendle market loader into `fractal-defi`
 
+> **STATUS: PR opened.** See
+> [Logarithm-Labs/fractal-defi#82](https://github.com/Logarithm-Labs/fractal-defi/pull/82)
+> — `feat(loaders): add PendleMarketLoader for Pendle PT historical
+> data`. Base: `dev`. 5 files, +317 LOC, 7 new offline tests under
+> `@pytest.mark.core`, 41 existing core loader tests still pass. The
+> plan below is preserved for reference.
+
 This document plans the **Extra+1** contribution: a verified pull
 request to [`Logarithm-Labs/fractal-defi`](https://github.com/Logarithm-Labs/fractal-defi)
 that contributes our Pendle historical-data loader to the core
