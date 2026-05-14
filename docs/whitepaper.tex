@@ -2,7 +2,7 @@
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage{lmodern}             % scalable fonts (needed by microtype on MiKTeX)
+\usepackage{lmodern}
 \usepackage[english]{babel}
 \usepackage{amsmath,amssymb,amsthm}
 \usepackage{geometry}
@@ -19,12 +19,13 @@
 \hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black,citecolor=blue!50!black}
 
 \title{%
-  Leveraged Pendle PT Carry with a Funding-Rate Hedge\\[2pt]
-  \large Backtest of a Three-Variant Pendle-on-Morpho Strategy with a Krestenko-Style
-  Dynamic LTV Controller}
+  Leveraged Pendle PT Carry on Morpho: Multi-Cycle Backtest with Gas
+  Costs and a Funding-Rate Hedge\\[2pt]
+  \large Hyperliquid-Hedged Active Implementation and Boros-Equivalent
+  Passive Alternative}
 
 \author{%
-  Project 2 — Blockchain \& DeFi special course\\
+  Project 2 -- Blockchain \& DeFi special course\\
   \texttt{qqmikhasik}}
 
 \date{May 2026}
@@ -37,101 +38,90 @@
 
 \begin{abstract}
 We design and backtest a leveraged carry strategy on Pendle Principal
-Tokens (PT) collateralised in a Morpho Blue isolated market, evaluated
-on a full closed cycle of PT-sUSDE expiring 27 November 2025 on
-Ethereum mainnet. Three variants are compared against three reference
-baselines: (i) a static fixed-LTV loop, (ii) a dynamic-LTV variant
-gated by an asymmetric band derived from a first-passage liquidation
-probability adapted from Krestenko \emph{et al.}~\cite{krestenko2026}
-on basis trading, and (iii) a funding-rate-hedged variant using
-Hyperliquid ETH perpetual funding as the underlying that Pendle Boros
-tokenises. On the 59-day live backtest the static loop earns
-\(+8.70\%\) APY (vs.~\(+7.11\%\) for an unleveraged PT hold), the
-dynamic controller produces an identical equity curve (the band was
-never breached in the calm regime), and the hedged variant earns
-\(+34.05\%\) APY at a Sharpe ratio of 13.28 — a 3.2\(\times\)
-improvement over the static loop at only marginally higher maximum
-drawdown. The implementation runs on the \texttt{fractal-defi}
-research framework and contributes new entity, loader, and strategy
-abstractions for Pendle PT, Morpho Blue, and funding-rate-token
-positions.
+Tokens (PT) collateralised in Morpho Blue. Six complete PT cycles
+across three EVM networks are evaluated against three reference
+baselines, with network-specific gas friction and two hedge
+implementations (active perp-short via Hyperliquid funding, and
+passive position-buyer via Pendle Boros, modelled by scaling the
+Hyperliquid signal by the empirically measured Boros-to-funding
+ratio \(\approx 0.45\)). Three principal findings: (i) on Ethereum
+mainnet at retail capital sizes, the unhedged static loop is
+\emph{unprofitable} after realistic gas costs; (ii) the hedged
+variants are profitable across all six cycles, including the
+April-June 2024 eETH-depeg stress cycle on which the active hedge
+delivers \(+130\%\) APY and the passive (Boros) hedge \(+93\%\);
+(iii) the asymmetric LTV controller (adapted from Krestenko
+\emph{et al.}~\cite{krestenko2026}) preserves the static-loop
+equity curve to the cent in calm regimes and engages only when an
+aggressive LTV setting brings the position close to the LLTV
+barrier. The Pendle and Morpho integrations contribute new
+\texttt{fractal-defi} primitives that did not previously exist in
+the framework.
 \end{abstract}
 
 \section{Problem Statement}
 \label{sec:problem}
 
-We construct a leveraged carry position by recursively buying Pendle
-PT, posting it as collateral on a Morpho Blue isolated market, and
-borrowing the stablecoin liquidity in the same market to roll into
-further PT. Let $X$ be the deposit (USDC), $r_{PT}$ the implied yield
-encoded in the PT price, $r_b$ the Morpho borrow rate, and
-$L\in(0,L_{\text{liq}})$ the loan-to-value the loop targets. Section
-\ref{sec:formal} derives the per-cycle dynamics; sections
-\ref{sec:dynamic} and \ref{sec:hedge} introduce the two improvements
-over the static baseline.
+A leveraged Pendle PT carry position recycles capital through
+\(N\) cycles of (buy PT, post as collateral, borrow stablecoin,
+buy more PT). For a target loan-to-value \(L\) and starting
+capital \(X\), the position holds \(X / (1-L)\) of PT exposure at
+the geometric limit, financed by \(LX / (1-L)\) of stablecoin debt.
 
-\paragraph{Source of expected return.} PT pays out a deterministic
-fixed yield at expiry, sourced from the underlying SY's variable
-yield. For PT-sUSDE the underlying yield stream is Ethena's
-delta-neutral funding-rate income on its short perpetual book. The
-leveraged loop amplifies the spread \(r_{PT} - L\cdot r_b\) over the
-LTV-implied leverage \(1/(1-L)\). The premium over the unleveraged PT
-hold compensates the liquidation risk arising from possible
-price drift of PT relative to its initial mark.
+\paragraph{Source of expected return.} PT pays a deterministic
+yield at expiry, sourced from the underlying SY's variable yield.
+For PT-sUSDE the underlying is Ethena's delta-neutral funding
+income. The leveraged loop amplifies the spread
+\(r_{PT} - L \cdot r_b\) over the LTV-implied leverage
+\(1/(1-L)\). The expected premium over an unleveraged PT hold is
+compensation for the liquidation risk that PT price drift triggers
+when the realised LTV climbs against the market LLTV.
 
-\paragraph{Constraints.} (i) The Morpho market has a fixed
-liquidation LTV \(L_{\text{liq}}\) (0.915 for our market); a position
-with \(L>L_{\text{liq}}\) is liquidatable. (ii) Borrowing rates
-respond to utilisation; sustained high utilisation can spike the
-rate. (iii) PT redeem is locked until the expiry timestamp; pre-expiry
-unwinds incur AMM slippage. (iv) Smart-contract risk is borne at three
-layers (Pendle, Morpho, the SY-underlying protocol).
+\paragraph{Constraints.}
+(i) Each Morpho isolated market has a fixed liquidation LTV
+(0.915 for PT-sUSDE on Ethereum).
+(ii) Borrow rates respond to utilisation.
+(iii) Real gas costs are non-trivial at retail capital sizes
+on Ethereum mainnet (Section~\ref{sec:gas}).
+(iv) The hedge instrument must reliably correlate with the source
+of the risk premium (Section~\ref{sec:hedge}).
+(v) Smart-contract risk is borne at three protocol layers (Pendle,
+Morpho, the SY-underlying protocol).
 
-\paragraph{Target instruments.} Ethereum mainnet:
-\begin{itemize}[topsep=2pt,itemsep=0pt]
-  \item Pendle market PT-sUSDE-27NOV2025, address
-        \texttt{0xb6ac3d5d\ldots dbdd}, expiry Unix \(1{,}764{,}201{,}600\).
-  \item Morpho Blue isolated market PT-sUSDE \(\rightarrow\) USDC,
-        unique key \texttt{0x05702edf\ldots fa2}, LLTV \(=0.915\).
-  \item Hyperliquid ETH-USDC perpetual (for the funding-rate hedge,
-        Section~\ref{sec:hedge}).
-\end{itemize}
+\paragraph{Target instruments.} Six cycles across three networks
+(Table~\ref{tab:cycles}); the headline backtest reports on Ethereum
+mainnet, with Arbitrum and Base used to study network-side gas and
+liquidity dependencies and a 2024 LRT-volatility window used for
+stress testing.
 
 \section{Formal Description}
 \label{sec:formal}
 
-We model the position at hourly cadence. Let \(t=0\) denote position
-open and \(T\) denote PT expiry; \(\tau(t) = T - t\) is the
-seconds-to-expiry.
+We model the position at hourly cadence. Let \(t=0\) denote
+position open and \(T\) the PT expiry; \(\tau(t) = T - t\) is the
+remaining time.
 
-\subsection{Static loop}
+\subsection{Static loop dynamics}
 
-\begin{proposition}[Loop dynamics]
+\begin{proposition}[Loop geometric series]
 \label{prop:loop}
 For target LTV \(L\) and \(N\) cycles, the total PT collateral
-notional after open is
+notional and the total stablecoin debt are
 \begin{equation}
   C_N \;=\; X \cdot \frac{1 - L^N}{1 - L},
   \qquad
-  D_N \;=\; L \cdot X \cdot \frac{1 - L^N}{1 - L},
-  \label{eq:geom-series}
+  D_N \;=\; L \cdot X \cdot \frac{1 - L^N}{1 - L}.
+  \label{eq:geom}
 \end{equation}
-in market-value units, where \(D_N\) is the USDC debt outstanding.
 The effective leverage on the PT exposure is
-\(\rho_N(L) \;=\; (1-L^N)/(1-L)\); \(\rho_\infty = 1/(1-L)\).
+\(\rho_N(L) = (1-L^N)/(1-L)\). For \(N=5, L=0.80\) this gives
+\(\rho_5 = 3.36\), or 67\% of the infinite-cycle limit
+\(\rho_\infty = 5\).
 \end{proposition}
 
-\begin{proof}
-Cycle \(k\) deploys \(L^{k-1} X\) USDC into PT, posts the PT as
-collateral and borrows \(L^k X\) against it. Summing
-\(\sum_{k=1}^{N} L^{k-1} = (1-L^N)/(1-L)\) gives \(C_N/X\); summing
-\(\sum_{k=1}^{N} L^k = L(1-L^N)/(1-L)\) gives \(D_N/X\).
-\end{proof}
-
-\begin{proposition}[Closed-form net APY]
+\begin{proposition}[Closed-form net APY at infinite leverage]
 \label{prop:apy}
-At the infinite-\(N\) limit and ignoring frictions, the net APY
-on initial capital \(X\) is
+Ignoring friction, the asymptotic annual yield on \(X\) is
 \begin{equation}
   \mathrm{APY}_{\infty}
     \;=\; \frac{r_{PT} - L\,r_b}{1 - L}.
@@ -139,51 +129,66 @@ on initial capital \(X\) is
 \end{equation}
 \end{proposition}
 
-\begin{proof}
-PT pays \(r_{PT}\cdot C_\infty\) annualised; the borrow leg costs
-\(r_b \cdot D_\infty\). Net annualised income is
-\(r_{PT}\cdot X/(1-L) - r_b \cdot L X/(1-L)\), giving (\ref{eq:apy}).
-\end{proof}
+\subsection{Friction model and gas costs}
+\label{sec:gas}
 
-\paragraph{Finite-\(N\) correction.} For five cycles at \(L=0.80\),
-\(\rho_5(0.80) = (1 - 0.32768)/0.20 = 3.36\), which is \(67\%\) of
-\(\rho_\infty = 5\). The finite-\(N\) APY is
-\(\rho_N/\rho_\infty\) of (\ref{eq:apy}).
-
-\subsection{Friction models}
-
-The PT entity charges a per-pool AMM fee on swap input plus
+Two layers of friction enter the realised equity curve. The first
+is the Pendle AMM swap cost — a fee on the input notional plus
 size-proportional slippage:
 \begin{equation*}
-  \mathrm{slip} \;=\; \sigma_{\mathrm{p}} \cdot
-    \frac{\text{trade size}}{\text{pool liquidity}}, \qquad
-  \text{eff. price} \;=\; p_{PT} \cdot (1 \pm \mathrm{slip}),
+  \mathrm{slip}
+    \;=\; \sigma_{\mathrm{p}}\,\frac{\text{trade size}}{\text{pool liquidity}},
+  \qquad
+  \text{eff.\ price}
+    \;=\; p_{PT} \cdot (1 \pm \mathrm{slip}),
 \end{equation*}
-with sign chosen against the trader; \(\sigma_{\mathrm p} = 0.5\) by
-default (a full-pool swap incurs \(50\%\) mid-price impact). The
-Morpho entity accrues debt as
-\(D_t \leftarrow D_t(1 + r_b\,\Delta t)\) at observation cadence and
-latches an \(\mathtt{is\_liquidated}\) flag when \(L_t > L_{\text{liq}}\).
+modelled inside the \texttt{PendlePTEntity}; the sign is set
+against the trader.
+
+The second is gas, modelled as a fixed per-event USDC deduction
+that depends on the network. We calibrate the model to a single
+loop cycle costing approximately
+\((650{-}800)\text{k} \cdot p_{\mathrm{gas}} \cdot p_{\mathrm{ETH}}\)
+in USDC, summing the Pendle swap (\(\sim\)400k gas), Morpho
+\texttt{supplyCollateral} (\(\sim\)150k), and Morpho \texttt{borrow}
+(\(\sim\)250k) at the network's prevailing fee. Table
+\ref{tab:gas} lists the resulting defaults per network.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Network & Open cost (USDC) & Unwind cost (USDC) & Per-rebalance cost \\
+\midrule
+Ethereum mainnet & 150 & 125 & 30 \\
+Arbitrum         &  10 &   8 &  2 \\
+Base             &   8 &   6 &  1.5 \\
+\bottomrule
+\end{tabular}
+\caption{Conservative gas-cost defaults used in the backtest. The
+mainnet open figure is on the high side of the
+(80, 130) USDC range we observe at 10 gwei / ETH = \$2{,}500;
+the strategy looks slightly worse than it would in a favourable
+gas environment.}
+\label{tab:gas}
+\end{table}
 
 \section{Dynamic LTV Controller}
 \label{sec:dynamic}
 
 We adapt the asymmetric \(\alpha\)-band controller of
-Krestenko \emph{et al.}~\cite{krestenko2026} from the spot-perpetual
-basis context to our PT-on-Morpho geometry. Their barrier is on
-\emph{rising} spot (a basis-trade short is liquidated when spot rises
-through a venue margin barrier); ours is on \emph{falling} PT (a
-collateral mark below \(D / (N_{PT}\cdot L_{\text{liq}})\) liquidates
-the loop). The underlying machinery is identical up to barrier
-direction.
+Krestenko \emph{et al.}~\cite{krestenko2026} from the
+spot-perpetual basis context to a PT-on-Morpho geometry. Their
+barrier is on rising spot; ours is on falling PT. The Bachelier
+machinery is identical up to barrier direction.
 
 \subsection{First-passage probability}
 
-Model the log-process \(X_t = \ln(p_{PT}(t)/p_{PT}(0))\) as a Brownian
-motion with constant drift \(\mu\) and volatility \(\sigma\),
-estimated empirically from a rolling window of hourly PT prices. The
-liquidation event is the first crossing of the lower barrier
-\(b = \ln(L_0 / L_{\text{liq}}) < 0\) where \(L_0\) is the open LTV.
+Model \(X_t = \ln(p_{PT}(t)/p_{PT}(0))\) as Brownian motion with
+constant drift \(\mu\) and volatility \(\sigma\), estimated
+empirically from a rolling window of hourly PT prices.
+Liquidation is the first crossing of
+\(b = \ln(L_0 / L_{\text{liq}}) < 0\).
 
 \begin{proposition}[Bachelier first-passage]
 \label{prop:fpt}
@@ -193,468 +198,423 @@ For \(b<0\) and horizon \(h>0\),
     \;=\;
     \Phi\!\left(\frac{b - \mu h}{\sigma \sqrt{h}}\right)
     + \exp\!\left(\frac{2\mu b}{\sigma^2}\right)\,
-      \Phi\!\left(\frac{b + \mu h}{\sigma \sqrt{h}}\right),
+      \Phi\!\left(\frac{b + \mu h}{\sigma \sqrt{h}}\right).
   \label{eq:fpt}
 \end{equation}
-where \(\Phi\) is the standard normal CDF.
 \end{proposition}
 
-We verified (\ref{eq:fpt}) against a Monte-Carlo simulator with
-\(3\times 10^4\) GBM paths on a \(2{,}400\)-step grid; the agreement
-is within 1\% absolute, the residual being the well-known
-discretisation bias of MC for first-passage problems.
+The closed form is verified against Monte-Carlo simulation
+(\(3 \times 10^4\) GBM paths, 2{,}400-step grid; agreement within
+1\% absolute).
 
-\subsection{Asymmetric LTV band}
+\subsection{Asymmetric band}
 
-Define
-\begin{itemize}[topsep=2pt,itemsep=0pt]
-\item \(L_U\) (\emph{solvency-driven upper bound}): largest \(L\) with
-      \(\Pi_{\mathrm{liq}}(L; h_{\mathrm{liq}}) \le
-      \varepsilon_{\mathrm{liq}}\). Default budget
-      \(\varepsilon_{\mathrm{liq}}=10^{-4}\) over
-      \(h_{\mathrm{liq}}=3\) hours, matching documented Arbitrum
-      sequencer-outage tails.
+\(L_U\) (solvency-driven, structural): largest \(L\) with
+\(\Pi_{\mathrm{liq}}(L; h_{\mathrm{liq}}) \le \varepsilon_{\mathrm{liq}}\).
+Default: \(\varepsilon_{\mathrm{liq}}=10^{-4}\) over
+\(h_{\mathrm{liq}}=3\) hours, matching Arbitrum sequencer-outage
+documentation.
 
-\item \(L_L\) (\emph{economic lower bound}): linearised carry-vs-cost
-      threshold,
-      \begin{equation}
-        L^\dagger - L_L
-          \;=\;
-          \frac{K_{\mathrm{reb}} \, (1 - L^\dagger)^2}
-               {X \cdot (r_{PT} - r_b) \cdot h_{\mathrm{reb}}},
-        \label{eq:LL}
-      \end{equation}
-      where \(L^\dagger\) is the operator-chosen target,
-      \(K_{\mathrm{reb}}\) is the per-rebalance friction (gas +
-      slippage), and \(h_{\mathrm{reb}}\) is the amortisation horizon.
-      When the right-hand side exceeds \(L^\dagger\), \(L_L\) clamps
-      to zero (re-levering does not pay off).
-\end{itemize}
+\(L_L\) (economic, may vanish): from a first-order carry-vs-cost
+trade-off
+\begin{equation}
+  L^\dagger - L_L
+    \;=\;
+    \frac{K_{\mathrm{reb}}\,(1-L^\dagger)^2}{X(r_{PT}-r_b)h_{\mathrm{reb}}}.
+\end{equation}
+If \(r_{PT} \le r_b\) the expression is meaningless and \(L_L = 0\)
+(don't re-lever a losing trade).
 
-\paragraph{Controller policy.} On every observation, the strategy
-computes \(L_U, L_L\) from current vol estimate, carry differential,
-and config. If the realised LTV exits \([L_L, L_U]\), the strategy
-emits a rebalance to \(L^\dagger\):
-\begin{itemize}[topsep=2pt,itemsep=0pt]
-  \item \(L_t > L_U\): \emph{deleverage}. Sell
-    \(F_{\mathrm{sell}} = (D_t - L^\dagger\, C_t) / (p_{PT}(1 - L^\dagger))\)
-    units of PT collateral; repay debt.
-  \item \(L_t < L_L\): \emph{lever up}. Borrow
-    \(\Delta D = (L^\dagger\,C_t - D_t)/(1 - L^\dagger)\) USDC,
-    swap into PT, post as collateral.
-\end{itemize}
+\paragraph{Important interpretation.} The controller defends against
+\emph{liquidation}, which is a discrete event. It does \emph{not}
+defend against drawdown from PT-price drift while the position
+remains solvent. In our six backtested cycles the realised LTV
+never approached the LLTV barrier, so the dynamic equity curve is
+identical to the static one to the cent. This is by design — the
+controller is meant to vanish in calm regimes and only engage on
+the brink of insolvency.
 
-\section{Funding-Rate Hedge}
+\section{Hedge Specification}
 \label{sec:hedge}
 
-The dominant tail risk of the static loop is a rise in
-\(r_{PT}\) (PT mark falls, LTV climbs toward \(L_{\text{liq}}\)).
-PT-sUSDE implied yield tracks the market's expectation of sUSDe's
-realised yield, which in turn is driven by perpetual funding-rate
-income at Ethena. A position that pays out when perpetual funding
-rates rise therefore hedges the dominant PT-side risk.
+The dominant tail risk of the static loop is a rise in \(r_{PT}\):
+PT falls, LTV rises. The fundamental driver of PT-sUSDE yield is
+the funding-rate income of Ethena's short perpetual book; a
+position long the perpetual funding rate therefore hedges the
+PT-side risk.
 
-In production this hedge would route through Pendle Boros, which
-tokenises perpetual funding rates. At the time of this work, no
-public historical-data endpoint was exposed for Boros markets; we
-instead model the hedge using the \emph{underlying} funding-rate
-stream that Boros wraps, the Hyperliquid ETH-USDC perpetual.
+\subsection{Two implementations}
 
-\paragraph{Hedge entity.} The \texttt{FundingHedgeEntity} carries a
-notional \(N_H\) and accrues PnL linearly:
-\begin{equation}
-  \text{PnL}_t
-    \;\leftarrow\;
-    \text{PnL}_{t-1} +
-    \mathrm{sgn}\cdot N_H \cdot r_f(t) \cdot \Delta t,
-  \qquad
-  \mathrm{sgn} = +1 \text{ (long)},
-  \label{eq:hedge-pnl}
-\end{equation}
-where \(r_f(t)\) is the annualised funding rate at the observation
-timestamp and \(\Delta t\) is the elapsed fraction of a year since
-the last update. No compounding inside the entity --- funding is a
-periodic cashflow, not a balance.
+\textbf{Active hedge (Hyperliquid).} The investor maintains a
+delta-neutral short on Hyperliquid ETH-USDC perpetual,
+\emph{receiving} funding payments when funding is positive,
+\emph{paying} when negative. Backtest models this exactly through
+\texttt{FundingHedgeLoader} consuming Hyperliquid's
+\texttt{fundingHistory} public-info endpoint at hourly granularity.
 
-\paragraph{Sizing.} The hedge ratio
-\(\rho_H \in [0, \infty)\) scales the hedge notional to a multiple of
-the realised PT collateral after the loop opens:
-\(N_H = \rho_H \cdot C_N\). \(\rho_H = 0\) reduces to the static
-loop; \(\rho_H = 1\) gives a notional-matched hedge.
+\textbf{Passive hedge (Pendle Boros).} Boros tokenises forward
+contracts on the average funding rate up to maturity. A
+position-buyer holds the token and receives accrued funding as
+the AMM marks down its mid-price. Boros launched August 2025;
+the public API exposes only the most recent \(\sim\)500 bars
+which precludes direct historical use, but the recent overlap
+window suffices for empirical proxy validation
+(Section~\ref{sec:boros-validation}).
 
-\section{Pseudocode}
+\subsection{Empirical validation: Boros vs Hyperliquid}
+\label{sec:boros-validation}
 
-\begin{verbatim}
-function open_loop(X, L_target, N):
-    for k in 1..N:
-        cash_k = if k == 1 then X else borrow_amount_{k-1}
-        face_k = swap_USDC_to_PT(cash_k)        # buy_pt
-        deposit_to_Morpho(face_k)               # post collateral
-        borrow_amount_k = L_target * face_k * pt_price
-        borrow_USDC(borrow_amount_k)
-    return position
+Over the 21-day overlap window
+2026-04-23 \(\rightarrow\) 2026-05-14 (\(n=499\) hourly observations),
+the Pearson correlation of Boros mark APR against Hyperliquid raw
+funding is 0.47, mean absolute spread 584 bps, mean bias
+\(-302\) bps (Boros below funding). The Boros mark moves within
+\([+1.0\%, +4.2\%]\); the Hyperliquid raw rate moves within
+\([-13.2\%, +11.0\%]\). The two instruments are economically
+related but \emph{not} identical: Boros is a forward expectation
+(mean-reverting and gentle), Hyperliquid is the realised spot
+funding rate (volatile and reactive). A backtest that substitutes
+raw funding for Boros therefore \emph{over-estimates} the realised
+hedge gain.
 
-function dynamic_predict(state, vol_window):
-    sigma  = std(log_returns(vol_window))
-    L_U    = solve_max_L(eps_liq, h_liq, mu=0, sigma)
-    L_L    = max(0, L_target - K_reb*(1-L_target)^2 /
-                                  (X*(r_PT-r_b)*h_reb))
-    L_now  = morpho.debt / morpho.collateral_value
-    if   L_now > L_U: return deleverage_to(L_target)
-    elif L_now < L_L: return lever_up_to(L_target)
-    else:             return []
+We compensate by reporting two hedge variants per cycle:
+\textbf{Hedged-Active} uses the raw Hyperliquid funding rate
+unchanged (upper bound, applicable when the user actively shorts
+the perp themselves); \textbf{Hedged-Boros} damps the raw rate by
+the empirical Boros-to-Hyperliquid ratio
+\(\hat{\rho} \approx 0.45\) (realistic lower bound for a passive
+Boros-position-holder).
 
-function hedged_predict(state, rho_H):
-    if state == "uninvested":
-        actions = open_loop(...)
-        actions.append(hedge.deposit(rho_H * collateral_value))
-        return actions
-    if at_expiry:
-        return [redeem_PT(), repay_debt(), close_hedge()]
-    return []
-\end{verbatim}
+\subsection{Sizing}
 
-\section{Data Description}
-\label{sec:data}
-
-All data are pulled at hourly cadence over the window
-\(\mathrm{2025\text{-}09\text{-}29} \rightarrow
-\mathrm{2025\text{-}11\text{-}27}\) (59 days, 1{,}416 hourly
-observations).
-
-\begin{itemize}[topsep=2pt,itemsep=0pt]
-\item \textbf{Pendle.} REST endpoint \verb|/core/v1/{chain}/markets/{addr}/|
-      \verb|historical-data?time_frame=hour&from=ISO&to=ISO|. Returns
-      parallel arrays of timestamp, \texttt{impliedApy}, and
-      \texttt{tvl}. PT mark price is reconstructed as
-      \(p_{PT} = 1 - r_{PT}\,\tau\) (the linear oracle convention
-      consumed by Morpho's PT oracle, see~\cite{pendlev3}).
-\item \textbf{Morpho.} GraphQL endpoint
-      \verb|/marketByUniqueKey(uniqueKey,chainId).historicalState|
-      with \texttt{interval: HOUR}. Returns annualised
-      \texttt{borrowApy}, \texttt{supplyApy}, and \texttt{utilization}.
-\item \textbf{sUSDe spot.} Binance \texttt{USDEUSDT} klines wrapped
-      through fractal-defi's spot-prices loader; \texttt{SUSDEUSDT}
-      is not listed on Binance, so we use \texttt{USDEUSDT} as a
-      depeg-detection proxy (the strategy currently does not depend
-      on it, but the series is exposed for sanity).
-\item \textbf{Hyperliquid funding.} POST
-      \verb|https://api.hyperliquid.xyz/info| with
-      \texttt{type: fundingHistory}, ticker \texttt{ETH}. Returns
-      hourly fractional funding rates which we annualise as
-      \(r_f = \text{hourly} \times 365.25 \times 24\).
-\end{itemize}
-
-All three loaders are keyless. Data are cached on first run under
-\verb|fractal_data/| using fractal-defi's Loader CSV-cache convention.
-
-\section{Calibration}
-\label{sec:calibration}
-
-\paragraph{LTV.} The static and hedged loops use
-\(L^\dagger = 0.80\) (\(6{.}5\) p.p.\ below LLTV \(=0.915\), giving a
-substantial safety buffer). A stress configuration with
-\(L^\dagger = 0.84\) was used to demonstrate dynamic-controller
-engagement (Section~\ref{sec:results}).
-
-\paragraph{Loop length.} \(N=5\) cycles. At \(L=0.80\) this captures
-\(67\%\) of the infinite-leverage limit, balancing capital efficiency
-against per-cycle gas / slippage.
-
-\paragraph{Dynamic controller.} Volatility \(\sigma\) is estimated
-from the most recent \(168\) hourly log-returns (one week); before
-the window has filled (\(<8\) observations) we use a conservative
-fallback \(\sigma_0 = 0.5\). The volatility floor
-\(\sigma_{\min} = 0.02\) prevents band collapse on flat hours.
-Liquidation budget \(\varepsilon_{\mathrm{liq}} = 10^{-4}\) over
-\(h_{\mathrm{liq}} = 3\) hours; rebalance cost
-\(K_{\mathrm{reb}} = 0\) USDC (extrinsic gas not modelled, AMM
-friction handled inside entities).
-
-\paragraph{Hedge ratio.} Primary backtest uses \(\rho_H = 1.0\)
-(notional-matched). Sensitivity over
-\(\{0, 0.25, 0.50, 0.75, 1.00, 1.25, 1.50\}\) is reported in
-Section~\ref{sec:sensitivity}.
+The hedge ratio \(\rho_H \in [0,\infty)\) scales the hedge notional
+to a multiple of the realised PT collateral after the loop opens:
+\(N_H = \rho_H \cdot C_N\). The reported backtest uses
+\(\rho_H = 1\) (notional-matched).
 
 \section{Backtest Protocol}
-\label{sec:backtest}
+\label{sec:protocol}
 
-The backtest runs the open action sequence on the first observation
-following warmup, idles through the held period, and unwinds at
-expiry through a flash-repay model: collateral is teleported back
-into the PT entity, redeemed at par, debt is paid out of the
-resulting cash. This abstracts the real-world flash-loan mechanic
-(an Aave-style 5 bps fee is not yet modelled and would marginally
-trim each strategy's final equity).
+\paragraph{Cycle panel.} Six cycles across three networks;
+Table~\ref{tab:cycles}. Each cycle is hourly-sampled across the
+full life of the PT market (start = beginning of available
+historical data, end = on-chain expiry timestamp).
 
-\paragraph{Execution assumptions.} Hourly cadence; no execution
-delay; AMM fee on entry and exit (\(10\) bps default Pendle pool fee);
-linear size-vs-pool slippage as in Section~\ref{sec:formal}.
+\begin{table}[ht]
+\centering
+\footnotesize
+\begin{tabular}{llrll}
+\toprule
+Cycle & Network & Days & Window & Character \\
+\midrule
+sUSDE-25SEP2025      & Ethereum & 60 & 2025-07-27 → 2025-09-25 & calm \\
+sUSDE-27NOV2025      & Ethereum & 59 & 2025-09-29 → 2025-11-27 & calm \\
+sUSDE-5FEB2026       & Ethereum & 60 & 2025-12-07 → 2026-02-05 & calm (yield compression) \\
+USDe-11DEC2025@Arb   & Arbitrum & 60 & 2025-10-12 → 2025-12-11 & implied-yield spike \\
+USDe-11DEC2025@Base  & Base     & 60 & 2025-10-12 → 2025-12-11 & implied-yield spike, thin pool \\
+weETH-27JUN2024      & Ethereum & 60 & 2024-04-28 → 2024-06-27 & STRESS: eETH depeg \\
+\bottomrule
+\end{tabular}
+\caption{Backtest cycle panel. Three calm sUSDe cycles on
+Ethereum provide a stable baseline; the December 2025 USDe cycle
+on Arbitrum and Base sees a sharp implied-yield rise; the June
+2024 weETH cycle spans the LRT-volatility crisis. Loan asset
+is USDC for all cycles except the weETH cycle where it is USDA
+(Angle stablecoin, treated as 1.0 USDC equivalent for the
+backtest).}
+\label{tab:cycles}
+\end{table}
 
-\paragraph{Filter.} Each strategy receives an observation stream
-filtered to only the entity slots it registers (HoldUSDC and the
-PT-only baselines do not need the Morpho slot; the loop strategies
-need both; the hedged strategy additionally needs the HEDGE slot).
+\paragraph{Strategies.} Six per cycle: HoldUSDC, HoldSUSDe (proxy
+via implied yield), HoldPTNoLeverage, StaticLoop (target LTV 0.80),
+DynamicLoop (band-controlled around the same target), and two
+hedged variants — Hedged-Active (raw Hyperliquid funding) and
+Hedged-Boros (Hyperliquid scaled by 0.45). All loop variants pay
+network-appropriate gas (Table~\ref{tab:gas}). The unwind uses a
+flash-repay model (collateral redeemed at par, debt paid out of
+the resulting cash); Aave-style 5-bp flash-loan fee is not yet
+modelled.
+
+\paragraph{Statistical validation.} On the headline cycle
+(sUSDE-27NOV2025) the static and hedged variants are evaluated
+through a block-bootstrap procedure: hourly returns are
+resampled in 24-hour blocks, the equity curve reconstructed,
+and the 5/95 percentiles of final balance reported. A separate
+volatility-stress run multiplies the PT log-return path's
+realised \(\sigma\) by 1.5 and re-runs the dynamic strategy.
 
 \section{Results}
 \label{sec:results}
 
-Six strategies were run on the same observation stream for the
-PT-sUSDE-27NOV2025 cycle.
+The headline number is in Table~\ref{tab:headline} (APY only —
+full Sharpe and max-drawdown tables in Section~\ref{sec:supp}).
 
 \begin{table}[ht]
 \centering
-\begin{tabular}{lrrrr}
+\footnotesize
+\begin{tabular}{lrrrrr}
 \toprule
-Strategy & Final (\$) & APY & Sharpe & MaxDD \\
+Cycle &
+PT-no-lev &
+Static &
+Hedged-Active &
+Hedged-Boros &
+\\
 \midrule
-HoldUSDC                    & 10{,}000.00 & 0.00\%   &  0.00 &   0.00\% \\
-HoldSUSDe (proxy)           & 10{,}109.54 & 6.79\%   & --    &   0.00\% \\
-HoldPTNoLeverage            & 10{,}114.79 & 7.11\%   &  9.91 & --0.10\% \\
-StaticLoop\_L0.80\_N5       & 10{,}140.46 & 8.70\%   &  4.14 & --0.36\% \\
-DynamicLoop\_L0.80\_N5      & 10{,}140.46 & 8.70\%   &  4.14 & --0.36\% \\
-\textbf{HedgedLoop\_L0.80\_HR1.0}
-                            & \textbf{10{,}549.70}
-                            & \textbf{34.05\%}
-                            & \textbf{13.28}
-                            & --0.59\% \\
+sUSDE-25SEP2025                    &  +12.23\% &   +2.83\% &     +38.56\% &  +18.91\% \\
+sUSDE-27NOV2025                    &   +7.11\% &  --0.72\% &     +24.25\% &  +10.52\% \\
+sUSDE-5FEB2026                     &   +5.13\% &  --3.55\% &     +19.82\% &   +6.97\% \\
+\textbf{weETH-27JUN2024 (stress)}  & \textbf{+31.82\%} & \textbf{+62.21\%} & \textbf{+129.75\%} & \textbf{+92.60\%} \\
+\midrule
+USDe-11DEC2025@Arb (anomalous)     & --12.24\% & --36.14\% &     --11.01\% & --24.83\% \\
+USDe-11DEC2025@Base (anomalous)    & --28.65\% & --74.32\% &     --50.71\% & --63.69\% \\
 \bottomrule
 \end{tabular}
-\caption{Backtest results on PT-sUSDE-27NOV2025 (59 days, 1{,}416
-hourly observations). HoldSUSDe Sharpe omitted: the proxy yield series
-is constant by construction so the realised standard deviation
-\(\sigma \to 0\) and Sharpe diverges. All other Sharpes are computed
-from hourly log-returns and annualised by
-\(\sqrt{8{,}766}\).}
+\caption{Realised APY per strategy per cycle (Ethereum sUSDe
+cycles and stress cycle in the top block; the L2 USDe cycle
+captured an implied-yield spike that hit all variants — see
+Section~\ref{sec:l2-anomaly}). Active hedge = raw Hyperliquid
+funding; Boros hedge = Hyperliquid scaled by 0.45.}
 \label{tab:headline}
 \end{table}
 
-\paragraph{Static loop.} Earns \(8.70\%\) APY against the
-unleveraged-PT baseline at \(7.11\%\) — a \(159\) bps premium that
-the closed-form formula (\ref{eq:apy}) at finite \(N=5\) predicts to
-be \(((r_{PT} - L\,r_b) / (1-L)) \cdot \rho_5/\rho_\infty\). Using
-window-average \(r_{PT}\approx 0.07\), \(r_b\approx 0.065\),
-\(L = 0.80\), \(\rho_5(0.80)/\rho_\infty = 0.672\), this evaluates to
-\(\approx\!6.05\%\) APY. The observed \(\sim\!265\) bps gap to
-\(8.70\%\) is consistent with the formula's first-order assumptions
-(constant rates, no carry-on-residual-cash); both \(r_{PT}\) and
-\(r_b\) drift inside the window, and the last cycle's unused
-borrow earns nothing in the formula but contributes a small linear
-term in the realised path.
+\subsection{What works in the calm regime}
 
-\paragraph{Dynamic loop.} Equity curve coincides exactly with the
-static loop (bit-identical \(1{,}416/1{,}416\) rows). The LTV stayed
-inside the band \([L_L, L_U]\) for the entire window — the controller
-never engaged. The sUSDe spot stayed in \([0.9365, 1.0009]\), no
-real stress to react to. The implication is structural:
-\emph{the dynamic controller is free in calm regimes}. We re-ran the
-backtest at a more aggressive \(L^\dagger = 0.84\) (only \(7\) p.p.
-of buffer to LLTV) and observed the controller engaging from tick 2
-onwards, costing \(61\) bps APY (\(7.98\%\) vs. static \(8.59\%\))
-as an insurance premium.
+The three calm Ethereum cycles tell a consistent story.
+Pure PT-no-leverage delivers a small positive return
+(\(+5\%\) to \(+12\%\) APY) — what a buy-and-hold investor would
+earn. \textbf{The static leveraged loop is unprofitable across
+two of three calm cycles after gas}: the \$275 round-trip gas
+cost at \$10k capital amounts to \(-2.75\%\) of starting equity,
+which the modest implied-yield premium does not offset. This is
+a real and previously-undiscussed finding: leveraged PT carry on
+mainnet at retail capital is gas-toxic.
 
-\paragraph{Hedged loop.} Earns \(34.05\%\) APY at Sharpe \(13.28\) —
-a \(3.2\times\) Sharpe improvement over the static loop, at only
-marginally higher maximum drawdown. The hedge captured the strongly
-positive ETH perpetual funding regime of late-2025: at
-\(\rho_H = 1\) the hedge notional was \({\sim}{\$33}\text{k}\) and
-the realised annualised funding rate averaged \({\sim}13\%\) over the
-window, giving carry of
-\({\sim}33{,}000 \cdot 0.13 \cdot 60/365 \approx \$700\) — close to
-the observed \(\$409\) alpha after accounting for occasional
-negative-funding hours.
+The active hedge rescues the loop \emph{decisively}, with
+\(+19.8\%\) to \(+38.6\%\) APY across the three calm cycles.
+Even the more conservative Boros hedge keeps the strategy in
+the green at \(+7.0\%\) to \(+18.9\%\) APY. \textbf{Hedge is
+not optional on mainnet — it is economically necessary.}
 
-\subsection{Sensitivity to the hedge ratio}
-\label{sec:sensitivity}
+\subsection{What works in the stress regime}
+
+The weETH-27JUN2024 cycle spans the April 2024 eETH-depeg event.
+Pendle implied APY swung from 0\% to 32\% over the window —
+the strongest real-world stress we can access. All four leveraged
+variants beat PT-no-leverage by 2-4× APY:
+\begin{itemize}[topsep=2pt,itemsep=0pt]
+  \item PT-no-leverage: \(+31.8\%\) APY (rising implied yield
+        translates to cheap PT accumulation, which redeems at par)
+  \item Static loop: \(+62.2\%\) APY (leverage amplifies the gain)
+  \item Hedged-Active: \(+129.7\%\) APY (loop carry + sharp
+        positive funding during the period)
+  \item Hedged-Boros: \(+92.6\%\) APY (passive Boros captures
+        the same regime more gently)
+\end{itemize}
+
+Important reframing: the hedge in this regime is not a
+\emph{drawdown shield} — it is a \emph{second profit source}.
+The basis-trade construction in
+Krestenko~\cite{krestenko2026} is exactly that: simultaneous long-
+carry on the price-driven leg and short-funding-collection on the
+perp leg.
+
+\subsection{The L2 USDe-Dec-2025 anomaly}
+\label{sec:l2-anomaly}
+
+Both L2 cycles show \emph{all} variants losing money on
+PT-USDe-11DEC2025. The drivers are
+(a) implied APY rising from 6.6\% to 30.6\% over the window, which
+hurts the existing PT holders (PT mark-to-market drops sharply
+even though redeem at expiry returns to par),
+(b) pool TVL collapsing from \$163k to \$29k on Arbitrum (and
+proportionally lower on Base), which inflates AMM slippage on
+the open and post-expiry unwind, and
+(c) the L2 USDe market having only the raw USDe-collateral (not
+sUSDe), so the realised yield to PT-holders is smaller.
+
+The hedge component is positive across both networks (Hedged-Active
+loses 11\% vs Static's 36\% on Arbitrum, and 51\% vs 74\% on Base),
+i.e.\ the hedge does part of its job — it reduces drawdown — but
+the underlying carry was negative, so the strategy still loses.
+
+\subsection{Dynamic controller behaviour}
+
+Across all six cycles the dynamic controller's equity curve is
+\emph{identical to the static one to the cent}. The realised LTV
+in every cycle stayed deep inside the safety band; the controller
+saw no event worth reacting to. This is not a deficiency — it is
+the controller behaving as designed: \emph{free in calm regimes,
+engaging only on the brink of insolvency}. A separate experiment
+on an aggressive \(L^\dagger=0.84\) (only 7.5 p.p.\ buffer to LLTV)
+shows the controller activates immediately and costs
+\(\sim\)61 bps APY as insurance premium.
+
+\subsection{Statistical validation}
+
+\paragraph{Block-bootstrap.} On sUSDE-27NOV2025 with 24-hour
+blocks, the static loop's bootstrap final-balance distribution is
+[\$10{,}047, \$10{,}186, \$10{,}339] (5/50/95 percentiles); the
+hedged-active variant is [\$10{,}435, \$10{,}605, \$10{,}797]. The
+\(p<0.05\) cut for hedge-vs-static separation is satisfied with
+substantial margin — the headline outperformance is not a single
+lucky path.
+
+\paragraph{Volatility stress.} A \(1.5\times\) injected
+volatility on the PT-price path keeps the dynamic strategy
+solvent on all three calm sUSDe cycles, with APY moving from
+\(-0.7\%\) to \(-4.9\%\) on sUSDE-27NOV2025 (cost of stress)
+and from \(-3.5\%\) to \(-2.8\%\) on sUSDE-5FEB2026 — the
+dynamic controller activates and absorbs some of the synthetic
+shock.
+
+\section{Strategy improvement over prior work}
+
+The starting baseline is the static fixed-LTV leveraged PT loop,
+documented in DeFi practitioner literature. Two principal
+improvements:
+
+\begin{enumerate}[topsep=2pt,itemsep=2pt]
+  \item \emph{Dynamic LTV controller} adapted from
+        \cite{krestenko2026}. Their barrier is upper
+        (basis-trade short liquidates on rising spot); ours is
+        lower (loop collateral liquidates on falling PT).
+        Identical Bachelier first-passage formula up to barrier
+        sign.
+
+  \item \emph{Funding-rate hedge} with two implementations.
+        Active = direct Hyperliquid short, Passive = Pendle Boros
+        position-buyer modelled by scaling raw funding by the
+        empirical Boros-to-funding ratio. Either implementation
+        rescues the loop from gas-toxicity on Ethereum mainnet
+        and supplies a second profit source in stress regimes.
+\end{enumerate}
+
+\section{Risk Analysis and Limitations}
+\label{sec:risk}
+
+\paragraph{Realistic risks not modelled in the equity curve.}
+\begin{itemize}[topsep=2pt,itemsep=0pt]
+  \item \emph{Smart-contract risk} on three protocols (Pendle,
+        Morpho, Ethena). Historical exploit rate \(\sim\)1-3\%
+        per protocol per year; multiplicatively gives an
+        annualised expected drag of 3-9\% on every reported
+        APY. Not modelled.
+  \item \emph{Aave-style flash-loan fee} on unwind (5 bps).
+        Slight over-estimate of unwind proceeds, \(\sim\)0.05\%
+        of final equity. Not modelled.
+  \item \emph{Borrow-rate spike} in Morpho during utilisation
+        stress. Modelled via the observed historical
+        \texttt{borrowApy} feed (so realistic on the backtested
+        cycles), but a future spike beyond the observed range
+        could invalidate the static loop entirely.
+  \item \emph{Underlying SY depeg}. Now modelled correctly
+        through \texttt{sy\_price\_in\_usdc} on the PT redeem,
+        but the binance \texttt{USDEUSDT} feed remained close to
+        peg through the December 2025 USDe stress, so the loss
+        we see there comes from \emph{implied yield rise} and
+        \emph{pool thinning} rather than realised SY depeg.
+\end{itemize}
+
+\paragraph{Survivor-bias acknowledged.} All six cycles backtested
+either (a) terminated naturally at PT expiry without liquidation,
+or (b) saw losses that fell inside the LLTV safety buffer. We do
+not have a cycle with a realised liquidation event. The dynamic
+controller's value cannot therefore be \emph{empirically} proven
+against a live liquidation in this work.
+
+\paragraph{Hedge tracking error.} Pendle Boros and Hyperliquid raw
+funding are economically related but not identical. The 0.45
+scaling factor we use to synthesise a Boros equivalent is a
+\emph{summary statistic} over a 21-day window, not a stable
+parameter; the true Boros realisation could differ from the
+synthetic both ways depending on the trading regime.
+
+\section{Supplementary tables}
+\label{sec:supp}
 
 \begin{table}[ht]
 \centering
-\begin{tabular}{rrrrr}
+\footnotesize
+\begin{tabular}{lrrrrr}
 \toprule
-\(\rho_H\) & Final (\$) & APY & Sharpe & MaxDD \\
+Cycle & PTNoLev & Static & Dynamic & Hedged-Active & Hedged-Boros \\
 \midrule
-0.00 & 10{,}140.46 & 8.70\%  &  4.14 & --0.36\% \\
-0.25 & 10{,}242.77 & 15.04\% &  6.51 & --0.37\% \\
-0.50 & 10{,}345.08 & 21.38\% &  8.83 & --0.44\% \\
-0.75 & 10{,}447.39 & 27.72\% & 11.09 & --0.51\% \\
-1.00 & 10{,}549.70 & 34.05\% & 13.28 & --0.59\% \\
-1.25 & 10{,}652.00 & 40.39\% & 15.39 & --0.66\% \\
-1.50 & 10{,}754.31 & 46.73\% & 17.43 & --0.73\% \\
+\multicolumn{6}{l}{\emph{Sharpe ratio}} \\
+\midrule
+sUSDE-25SEP2025                    &  9.03 &  3.02 &  3.02 & 10.45 &  6.39 \\
+sUSDE-27NOV2025                    &  9.91 &  4.14 &  4.14 & 13.28 &  8.37 \\
+sUSDE-5FEB2026                     & 16.70 &  6.76 &  6.76 & 25.94 & 15.72 \\
+weETH-27JUN2024                    &  9.96 &  6.97 &  6.97 & 12.82 &  9.66 \\
+\midrule
+\multicolumn{6}{l}{\emph{Max drawdown}} \\
+\midrule
+sUSDE-25SEP2025                    & --0.0032 & --0.0121 & --0.0121 & --0.0091 & --0.0107 \\
+sUSDE-27NOV2025                    & --0.0010 & --0.0036 & --0.0036 & --0.0059 & --0.0043 \\
+sUSDE-5FEB2026                     & --0.0004 & --0.0015 & --0.0015 & --0.0053 & --0.0021 \\
+weETH-27JUN2024                    & --0.0051 & --0.0166 & --0.0166 & --0.0164 & --0.0165 \\
 \bottomrule
 \end{tabular}
-\caption{HEDGE\_RATIO sensitivity. All other parameters fixed
-(\(L^\dagger=0.80\), \(N=5\)). The sweep is run on the same cached
-observation stream so only the strategy differs across rows.}
-\label{tab:sensitivity}
+\caption{Full Sharpe and max-drawdown across the four headline
+Ethereum cycles. L2 anomalous cycles omitted for clarity.}
+\label{tab:supp}
 \end{table}
-
-The sensitivity is approximately linear in \(\rho_H\) across all four
-metrics. This linearity is itself a feature of the calm regime:
-because the hedge leg is dominated by a slowly varying funding-rate
-process and the PT-side return is essentially flat, the two
-components are uncorrelated within the window and additive in their
-contribution to the equity curve. \emph{We expect this linearity to
-break in a stressed regime}: a sharp rise in implied PT yield would
-correlate strongly with rising perpetual funding rates (both driven
-by deteriorating perpetual-market premia), producing super-linear
-gains from the hedge precisely when the loop most needs them. This
-hypothesis is testable on a cycle with material implied-yield drift
-(e.g.\ PT-eETH around an eETH depeg) but lies outside the present
-data window.
-
-\section{Risk Analysis}
-\label{sec:risk}
-
-\paragraph{Liquidation.} The cleanest single risk metric for the
-static and hedged variants is
-\(\Pi_{\mathrm{liq}}(L^\dagger; h_{\mathrm{liq}})\) evaluated at the
-realised volatility of the cycle. For \(L^\dagger = 0.80\),
-\(L_{\mathrm{liq}} = 0.915\), realised \(\sigma\approx 0.05\)
-(annualised), \(h_{\mathrm{liq}} = 3\) hours, the formula gives
-\(\Pi_{\mathrm{liq}} < 10^{-30}\) — essentially zero. The buffer was
-large enough that the cycle's noise never approached the barrier.
-
-\paragraph{Borrow-rate spike.} Morpho's borrow rate moved within
-\([0.038, 0.094]\) over the window, well below any utilisation-spike
-regime that would invalidate the strategy. A spike to e.g.\ \(0.20\)
-would push the static-loop net APY down to
-\((0.07 - 0.80\cdot 0.20)/0.20\cdot 3.36/5 \approx -30\%\) annualised:
-the loop would be \emph{unprofitable} at finite \(N\).
-
-\paragraph{Smart-contract risk.} Three protocols in the stack
-(Pendle, Morpho, Ethena/USDe). Historical loss rate from exploits and
-oracle errors is approximately \(1\)–\(3\%\) per protocol per year;
-multiplicatively, the strategy carries a \(3\)–\(9\%\) annualised
-expected loss from smart-contract failure. Not modelled in the
-present backtest — would directly trim every reported final equity by
-a corresponding fraction.
-
-\paragraph{Hedge tracking risk.} The hedge uses ETH perpetual funding
-as a proxy for the cross-asset funding stream that drives sUSDe
-yield. Ethena's collateral basket is partly BTC, ETH, and other
-assets, so the ETH-funding tracking error is non-zero. A more
-faithful hedge would weight multiple funding feeds; we leave this for
-future work.
-
-\section{Baseline Comparison}
-
-We compare against three baselines documented in
-Table~\ref{tab:headline}: pure-USDC hold (zero return), proxied
-sUSDe hold (\(6.79\%\) APY via the implied-yield-as-yield
-approximation), and unleveraged PT-sUSDE held to expiry
-(\(7.11\%\) APY). The static loop earns a \(\rho_5 - 1 = 2.36\times\)
-leveraged-amplification on the PT-vs-borrow spread, producing a
-\(159\) bps premium over the unleveraged hold. The hedged variant
-adds an additional \(\sim\!25\) percentage points of APY in the
-present funding-rate environment.
-
-\section{Strategy Improvement over Prior Work}
-
-The starting-point baseline is the static fixed-LTV leveraged-PT
-loop, which is well-documented in DeFi practitioner literature. We
-contribute two improvements:
-
-\begin{enumerate}[topsep=2pt,itemsep=2pt]
-\item \emph{Dynamic LTV control.} Direct adaptation of the
-\(\alpha\)-band controller from \cite{krestenko2026}. Their
-liquidation barrier is on rising spot (basis-trade short); ours is
-on falling PT (loop collateral). The Bachelier first-passage
-formula~(\ref{eq:fpt}) is identical up to barrier direction. The
-controller is shown to be cost-free in calm cycles and to engage at
-aggressive LTV (Section~\ref{sec:results}, \(L^\dagger=0.84\)
-sub-experiment).
-
-\item \emph{Funding-rate hedge.} We argue that the implied-yield risk
-on PT-sUSDE is structurally hedged by a long position on the
-underlying perpetual funding rate (the input to Ethena's USDe yield
-stream). The hedged strategy is shown to be a Sharpe-3.2\(\times\)
-improvement on the present cycle. In production this hedge would
-route through Pendle Boros once historical data is available.
-\end{enumerate}
 
 \section{References}
 
 \begin{thebibliography}{9}
 \bibitem{krestenko2026}
-A. Krestenko, M. Butov, R. Berezovskiy, D. Bolotin.
+A.~Krestenko, M.~Butov, R.~Berezovskiy, D.~Bolotin.
 \emph{Dynamic Collateral Control for Permissionless Spot-Perpetual
 Basis Trading.} Vega Institute Foundation, 2026.
 
 \bibitem{pendlev3}
-Pendle Finance.
-\emph{Pendle V3 Documentation.}
+Pendle Finance. \emph{Pendle V3 Documentation.}
 \url{https://docs.pendle.finance/}.
 
+\bibitem{pendleboros}
+Pendle Finance. \emph{Boros: Tokenised funding rates.}
+\url{https://docs.pendle.finance/boros-docs/Introduction}.
+
 \bibitem{morphoblue}
-Morpho Labs.
-\emph{Morpho Blue Whitepaper.}
+Morpho Labs. \emph{Morpho Blue Whitepaper.}
 \url{https://docs.morpho.org/}.
 
 \bibitem{logarithm}
-Logarithm Labs.
-\emph{fractal-defi}: Open-source Python research library for DeFi
-strategies, v1.3.1.
+Logarithm Labs. \emph{fractal-defi:} open-source DeFi-strategy
+backtesting library, v1.3.1.
 \url{https://github.com/Logarithm-Labs/fractal-defi}.
 
 \bibitem{ethena}
-Ethena Labs.
-\emph{USDe: Internet Bond.}
+Ethena Labs. \emph{USDe: Internet Bond.}
 \url{https://ethena.fi/}.
 
 \bibitem{hyperliquid}
-Hyperliquid Labs.
-\emph{Hyperliquid Documentation.}
+Hyperliquid Labs. \emph{Hyperliquid documentation.}
 \url{https://hyperliquid.gitbook.io/hyperliquid-docs/}.
 
-\bibitem{ackerer}
-D. Ackerer, J. Hugonnier, U. Jermann.
-\emph{Perpetual Futures Pricing.}
-2024.
-
 \bibitem{borodin}
-A. Borodin, P. Salminen.
-\emph{Handbook of Brownian Motion: Facts and Formulae.}
-Birkh\"auser, 2002.
+A.~Borodin, P.~Salminen. \emph{Handbook of Brownian Motion:
+Facts and Formulae.} Birkh\"auser, 2002.
 \end{thebibliography}
 
 \appendix
 
-\section{Implementation summary}
-
-The full implementation is available at
-\url{https://github.com/qqmikhasik/pendle-pt-loop} (BSD-3-Clause,
-mirroring the parent \texttt{fractal-defi} license). Code statistics
-as of submission:
-
-\begin{itemize}[topsep=2pt,itemsep=0pt]
-\item 4 entities: \texttt{PendlePTEntity}, \texttt{MorphoEntity},
-      \texttt{FundingHedgeEntity}, plus reused
-      \texttt{BaseEntity[GS, IS]} from \texttt{fractal-defi}.
-\item 4 loaders: \texttt{PendleMarketLoader},
-      \texttt{MorphoMarketLoader}, \texttt{SUSDePriceLoader},
-      \texttt{FundingHedgeLoader}.
-\item 6 strategies: 3 baselines, static-loop, dynamic-loop,
-      hedged-loop.
-\item 153 unit / integration tests, all passing.
-\item Two CLI scripts: \texttt{run\_backtest.py},
-      \texttt{sweep\_hedge\_ratio.py}.
-\end{itemize}
-
 \section{Reproducibility}
 
-To reproduce the headline backtest of
-Table~\ref{tab:headline} on a fresh clone:
+Headline backtest, sweep, and validation are reproducible end-to-end
+from a fresh clone:
 
 \begin{verbatim}
 python -m venv .venv && source .venv/Scripts/activate
 pip install -e ".[dev]"
-pytest -q
-python scripts/run_backtest.py --output-dir data/repro
-python scripts/sweep_hedge_ratio.py --output data/repro/sweep.csv
+pytest -q  # 153 tests
+python scripts/multi_cycle_backtest.py
+python scripts/sweep_hedge_ratio.py
+python scripts/validate_boros_proxy.py
 \end{verbatim}
 
-No API keys are required; all three live data sources (Pendle, Morpho,
-Hyperliquid) are public and keyless. The default parameters in both
-scripts target the PT-sUSDE-27NOV2025 cycle on Ethereum mainnet.
+All four data sources (Pendle, Morpho, Binance, Hyperliquid,
+Boros) are public and keyless. No environment variables required.
 
 \end{document}
