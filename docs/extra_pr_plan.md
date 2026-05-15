@@ -1,11 +1,26 @@
 # Extra+1: PR plan — Pendle market loader into `fractal-defi`
 
-> **STATUS: PR opened.** See
-> [Logarithm-Labs/fractal-defi#82](https://github.com/Logarithm-Labs/fractal-defi/pull/82)
-> — `feat(loaders): add PendleMarketLoader for Pendle PT historical
-> data`. Base: `dev`. 5 files, +317 LOC, 7 new offline tests under
-> `@pytest.mark.core`, 41 existing core loader tests still pass. The
-> plan below is preserved for reference.
+> **STATUS: TWO PRs OPENED.**
+>
+> 1. [PR #82](https://github.com/Logarithm-Labs/fractal-defi/pull/82) —
+>    `feat(loaders): add PendleMarketLoader for Pendle PT historical
+>    data`. Loader only. Base: `dev`. 5 files, +317 LOC, 7 new offline
+>    tests under `@pytest.mark.core`, 41 existing core loader tests
+>    still pass.
+> 2. [PR #83](https://github.com/Logarithm-Labs/fractal-defi/pull/83) —
+>    `feat: Pendle PT carry-loop stack — 3 entities + 3 loaders + typed
+>    structs`. **Comprehensive follow-up**: 3 new entities
+>    (`PendlePTEntity`, `MorphoEntity`, `FundingHedgeEntity`), 3 new
+>    loaders (Pendle, Morpho, Boros) with typed `*MarketHistory`
+>    structs, 6 new test modules / 47 cases under `@pytest.mark.core`.
+>    Base: `dev`. 16 files, +2374 LOC. **Supersedes PR #82**: if
+>    merged, maintainer can close #82. 698 of upstream's core tests
+>    pass (the 2-4 environment-specific framework-lockin failures
+>    pre-exist on clean `upstream/dev`).
+>
+> Total upstream contribution: **3 entities + 3 loaders + 3 typed
+> structs + 47 offline tests**. The plan below is preserved for
+> reference.
 
 This document plans the **Extra+1** contribution: a verified pull
 request to [`Logarithm-Labs/fractal-defi`](https://github.com/Logarithm-Labs/fractal-defi)
